@@ -1,7 +1,7 @@
 {
-  "name": "sentinelle-iot",
+  "name": "Acoustic&Vibration",
   "version": "1.0.0",
-  "description": "Sentinelle - Centre de contrôle surveillance son et vibration",
+  "description": "Acoustic&Vibration - Centre de contrôle surveillance son et vibration",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

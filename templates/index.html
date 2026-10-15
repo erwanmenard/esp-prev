@@ -11,7 +11,7 @@
     <!-- Chart.js pour des graphiques fluides et légers -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <!-- Feuille de style principale -->
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=3">
 </head>
 <body>
     <div class="app-layout">
@@ -210,7 +210,7 @@
                 <header class="view-header flex-header">
                     <div class="header-titles">
                         <h1>Appareils</h1>
-                        <p>Capteurs, ESP32, Arduino, ordinateurs ou Raspberry Pi : chaque appareil se lie en WiFi ou 4G. Ouvrez « Clé & envoi » pour le mettre en service.</p>
+                        <p>Capteurs, ESP32, Arduino, ordinateurs ou Raspberry Pi : chaque appareil transmet ses mesures en continu par WiFi, Ethernet ou 4G.</p>
                     </div>
                     <button class="btn btn-primary" onclick="openAddDeviceModal()">
                         <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.5" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -339,46 +339,9 @@
         </div>
     </div>
 
-    <!-- MODAL : CLÉ & ENVOI POUR LE RASPBERRY -->
-    <div id="modalApiKey" class="modal-overlay hidden">
-        <div class="modal-dialog modal-large">
-            <div class="modal-header">
-                <h3>Liaison de l'appareil & Clé API</h3>
-                <button class="close-btn" onclick="closeModal('modalApiKey')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p>Voici la clé d'identification secrète pour cet appareil. Utilisez-la dans votre script Python sur le Raspberry Pi :</p>
-                
-                <div class="key-box">
-                    <code id="displayApiKey">Chargement...</code>
-                    <button class="btn btn-sm btn-secondary" onclick="copyApiKey()">Copier</button>
-                </div>
 
-                <h4>Exemple de requête Python sur le Raspberry Pi :</h4>
-                <pre class="code-preview"><code>import requests
-
-data = {
-    "api_key": "<span class="code-key-placeholder">VOTRE_CLE</span>",
-    "vibration_peak": 1.95,
-    "vibration_mean": 0.17,
-    "sound_peak": 529.9,
-    "sound_mean": 137.1,
-    "kurtosis": 2.8,
-    "rms": 1.12
-}
-
-# Adresse locale ou Render
-url = "https://votre-site.onrender.com/api/telemetry"
-response = requests.post(url, json=data)
-print("Statut:", response.status_code)</code></pre>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-primary" onclick="closeModal('modalApiKey')">Fermer</button>
-            </div>
-        </div>
-    </div>
 
     <!-- Script JavaScript applicatif -->
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=3"></script>
 </body>
 </html>

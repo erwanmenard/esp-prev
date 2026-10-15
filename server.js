@@ -66,6 +66,43 @@ let localTelemetry = [];
 let localAlerts = [];
 
 // -------------------------------------------------------------
+// UTILITAIRES DE DATE & HEURE (FUSEAU EUROPE/PARIS UTC+2)
+// -------------------------------------------------------------
+function parseTsSafe(ts, ts_num) {
+    if (ts_num) return ts_num;
+    if (!ts) return 0;
+    let s = String(ts).trim();
+    if (!s.includes('Z') && !s.includes('+') && !s.slice(10).includes('-')) s = s.replace(' ', 'T') + 'Z';
+    const t = new Date(s).getTime();
+    return isNaN(t) ? 0 : t;
+}
+
+function formatParisTime(ts) {
+    if (!ts) return '';
+    const t = typeof ts === 'number' ? ts : parseTsSafe(ts);
+    if (!t) return String(ts);
+    return new Date(t).toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function formatParisFull(ts) {
+    const t = typeof ts === 'number' ? ts : parseTsSafe(ts);
+    if (!t) return 'jamais';
+    const d = new Date(t);
+    const date = d.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: '2-digit', year: 'numeric' });
+    const time = d.toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `${date} à ${time}`;
+}
+
+function formatParisCard(ts) {
+    const t = typeof ts === 'number' ? ts : parseTsSafe(ts);
+    if (!t) return '--:--';
+    const d = new Date(t);
+    const dayMonth = d.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', day: 'numeric', month: 'short' });
+    const time = d.toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour: '2-digit', minute: '2-digit' });
+    return `${dayMonth}, ${time}`;
+}
+
+// -------------------------------------------------------------
 // ROUTE PRINCIPALE
 // -------------------------------------------------------------
 app.get('/', (req, res) => {
@@ -78,21 +115,34 @@ app.get('/', (req, res) => {
 app.get('/api/devices', async (req, res) => {
     try {
         const now = Date.now();
+
         if (isFirebaseConnected) {
             const snapshot = await db.ref('devices').once('value');
             const data = snapshot.val() || {};
             const list = Object.keys(data).map(key => {
                 const item = data[key];
-                const lastSeenTime = item.last_seen_ts || (item.last_seen ? new Date(item.last_seen.replace(' ', 'T')).getTime() : 0);
+                const lastSeenTime = parseTsSafe(item.last_seen, item.last_seen_ts);
                 const is_online = (now - lastSeenTime) < 45000;
-                return { id: key, ...item, is_online };
+                // SÉCURITÉ : Ne jamais renvoyer la clé secrète au frontend public
+                const { api_key, ...safeItem } = item;
+                return { 
+                    id: key, 
+                    ...safeItem, 
+                    is_online,
+                    last_seen: formatParisFull(item.last_seen_ts || item.last_seen)
+                };
             });
             return res.json(list);
         }
 
         const devices = localDevices.map(d => {
-            const lastSeenTime = d.last_seen_ts || (d.last_seen ? new Date(d.last_seen.replace(' ', 'T')).getTime() : 0);
-            return { ...d, is_online: (now - lastSeenTime) < 45000 };
+            const lastSeenTime = parseTsSafe(d.last_seen, d.last_seen_ts);
+            const { api_key, ...safeItem } = d;
+            return { 
+                ...safeItem, 
+                is_online: (now - lastSeenTime) < 45000,
+                last_seen: formatParisFull(d.last_seen_ts || d.last_seen)
+            };
         });
         res.json(devices);
     } catch (e) {
@@ -116,12 +166,12 @@ app.post('/api/devices', async (req, res) => {
     if (isFirebaseConnected) {
         const ref = db.ref('devices').push();
         await ref.set(newDevice);
-        return res.status(201).json({ success: true, id: ref.key, api_key: newDevice.api_key });
+        return res.status(201).json({ success: true, id: ref.key });
     }
 
     newDevice.id = "dev_" + (localDevices.length + 1);
     localDevices.push(newDevice);
-    res.status(201).json({ success: true, id: newDevice.id, api_key: newDevice.api_key });
+    res.status(201).json({ success: true, id: newDevice.id });
 });
 
 app.put('/api/devices/:id', async (req, res) => {
@@ -159,7 +209,7 @@ app.post('/api/telemetry', async (req, res) => {
     const data = req.body || {};
     const apiKey = req.headers['x-api-key'] || data.api_key;
     const deviceName = data.device_name ? data.device_name.trim() : "Appareil-1";
-    const nowIso = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const nowIso = new Date().toISOString();
     const nowTs = Date.now();
 
     const record = {
@@ -230,6 +280,7 @@ app.post('/api/telemetry', async (req, res) => {
                     await db.ref('alerts').push({
                         device_name: deviceName,
                         timestamp: nowIso,
+                        timestamp_ts: nowTs,
                         metric: th.metric,
                         value: val,
                         threshold_value: th.threshold_value,
@@ -272,6 +323,7 @@ app.post('/api/telemetry', async (req, res) => {
                         id: "al_" + (localAlerts.length + 1),
                         device_name: deviceName,
                         timestamp: nowIso,
+                        timestamp_ts: nowTs,
                         metric: th.metric,
                         value: val,
                         threshold_value: th.threshold_value,
@@ -341,29 +393,21 @@ app.get('/api/telemetry/latest', async (req, res) => {
 
         let onlineCount = 0;
         devices.forEach(d => {
-            const lastSeenTs = d.last_seen_ts || (d.last_seen ? new Date(d.last_seen.replace(' ', 'T')).getTime() : 0);
+            const lastSeenTs = parseTsSafe(d.last_seen, d.last_seen_ts);
             if ((now - lastSeenTs) < 45000) onlineCount++;
         });
 
         const cards = [];
-        const mois = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
 
         // Construire les cartes de mesures pour chaque appareil ayant des données
         for (const devName of Object.keys(latestMap)) {
             const latest = latestMap[devName];
             if (!latest) continue;
-            let timeDisplay = latest.timestamp || "";
-            try {
-                const dt = new Date(latest.timestamp.replace(' ', 'T'));
-                if (!isNaN(dt.getTime())) {
-                    timeDisplay = `${dt.getDate()} ${mois[dt.getMonth()]}, ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
-                }
-            } catch (err) {}
 
             cards.push({
                 device_name: devName,
-                timestamp: latest.timestamp,
-                time_display: timeDisplay,
+                timestamp: latest.timestamp_ts || latest.timestamp || "",
+                time_display: formatParisCard(latest.timestamp_ts || latest.timestamp),
                 vibration_pic: latest.vibration_peak || 0,
                 vibration_moyenne: latest.vibration_mean || 0,
                 sound_peak: latest.sound_peak || 0,
@@ -374,8 +418,6 @@ app.get('/api/telemetry/latest', async (req, res) => {
             });
         }
 
-        const syncTime = new Date().toTimeString().split(' ')[0];
-
         res.json({
             kpis: {
                 devices_online_ratio: `${onlineCount} / ${devices.length}`,
@@ -384,7 +426,7 @@ app.get('/api/telemetry/latest', async (req, res) => {
             },
             cards: cards,
             alerts: openAlerts.slice(0, 5),
-            last_sync: syncTime
+            last_sync: formatParisTime(now)
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -411,7 +453,7 @@ app.get('/api/telemetry/history', async (req, res) => {
         }
 
         const slice = rows.slice(-limit);
-        const labels = slice.map(r => r.timestamp ? (r.timestamp.split(' ')[1] || r.timestamp) : '');
+        const labels = slice.map(r => formatParisTime(r.timestamp_ts || r.timestamp));
         const values = slice.map(r => r[metric] !== undefined ? r[metric] : 0);
 
         res.json({
@@ -486,14 +528,25 @@ app.get('/api/alerts', async (req, res) => {
     if (isFirebaseConnected) {
         const snap = await db.ref('alerts').once('value');
         const data = snap.val() || {};
-        let list = Object.keys(data).map(k => ({ id: k, ...data[k] }));
+        let list = Object.keys(data).map(k => {
+            const item = data[k];
+            return {
+                id: k,
+                ...item,
+                timestamp: formatParisFull(item.timestamp_ts || item.timestamp)
+            };
+        });
         if (status) {
             list = list.filter(a => a.status === status);
         }
         return res.json(list.reverse());
     }
-    if (status) return res.json(localAlerts.filter(a => a.status === status));
-    res.json(localAlerts);
+    const safeLocal = localAlerts.map(a => ({
+        ...a,
+        timestamp: formatParisFull(a.timestamp_ts || a.timestamp)
+    }));
+    if (status) return res.json(safeLocal.filter(a => a.status === status));
+    res.json(safeLocal);
 });
 
 app.post('/api/alerts/:id/resolve', async (req, res) => {

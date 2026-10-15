@@ -1,5 +1,5 @@
 // ==========================================================================
-// SENTINELLE - LOGIQUE CLIENT JAVASCRIPT
+// Acoustic&Vibration - LOGIQUE CLIENT JAVASCRIPT
 // ==========================================================================
 
 let currentView = 'dashboard';
@@ -158,6 +158,42 @@ function updateChart(labels, data, metricName) {
     historyChart.update('none'); // mise a jour sans saccade
 }
 
+// Fonctions utilitaires de date/heure (fuseau horaire local automatique)
+function parseDateSafe(ts) {
+    if (!ts) return null;
+    if (typeof ts === 'number') return new Date(ts);
+    let str = String(ts).trim();
+    if (!str) return null;
+    // Si la chaîne est au format "YYYY-MM-DD HH:mm:ss" sans Z, on ajoute Z pour interpréter en UTC
+    if (!str.includes('Z') && !str.includes('+') && !str.slice(10).includes('-')) {
+        str = str.replace(' ', 'T') + 'Z';
+    }
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+}
+
+function formatTime(ts) {
+    const d = parseDateSafe(ts);
+    if (!d) return '--:--:--';
+    return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function formatCardDateTime(ts) {
+    const d = parseDateSafe(ts);
+    if (!d) return '--:--';
+    const dayMonth = d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+    const time = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    return `${dayMonth}, ${time}`;
+}
+
+function formatFullDateTime(ts) {
+    const d = parseDateSafe(ts);
+    if (!d) return 'jamais';
+    const date = d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const time = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `${date} à ${time}`;
+}
+
 // -------------------------------------------------------------
 // TABLEAU DE BORD : CHARGEMENT DES DONNÉES
 // -------------------------------------------------------------
@@ -167,7 +203,7 @@ async function loadDashboard() {
         const data = await response.json();
 
         // 1. Horodatage et badge
-        document.getElementById('lastSyncTime').textContent = data.last_sync;
+        document.getElementById('lastSyncTime').textContent = formatTime(data.last_sync || Date.now());
 
         // 2. Cartes KPI
         document.getElementById('kpiDevices').textContent = data.kpis.devices_online_ratio;
@@ -221,7 +257,7 @@ function renderLatestCards(cards) {
         <div class="metric-card">
             <div class="metric-top">
                 <span>${activeCard.device_name}</span>
-                <span class="metric-time">${activeCard.time_display}</span>
+                <span class="metric-time">${formatCardDateTime(activeCard.timestamp)}</span>
             </div>
             <div class="metric-main">
                 <span class="metric-number">${formatNumber(item.val)}</span>
@@ -271,7 +307,11 @@ async function loadHistory() {
         const data = await res.json();
         
         document.getElementById('historyPointsCount').textContent = `${data.count} points`;
-        updateChart(data.labels, data.values, activeHistoryMetric);
+        const formattedLabels = (data.labels || []).map(ts => {
+            if (typeof ts === 'string' && ts.length <= 8 && ts.includes(':')) return ts;
+            return formatTime(ts);
+        });
+        updateChart(formattedLabels, data.values, activeHistoryMetric);
     } catch (err) {
         console.error("Erreur chargement historique :", err);
     }
@@ -314,15 +354,11 @@ async function loadDevices() {
                             ${d.location || 'Emplacement non précisé'}
                         </div>
                         <div class="device-status-text">
-                            ${isOnline ? '<span style="color:#10b981; font-weight:600;">● En ligne</span> · actif maintenant' : '<span style="color:#64748b;">○ Hors ligne</span>'} · dernière mesure : ${d.last_seen || 'jamais'}
+                            ${isOnline ? '<span style="color:#10b981; font-weight:600;">● En ligne</span> · actif maintenant' : '<span style="color:#64748b;">○ Hors ligne</span>'} · dernière mesure : ${formatFullDateTime(d.last_seen_ts || d.last_seen)}
                         </div>
                     </div>
                     <div class="device-actions">
-                        <button class="btn btn-secondary btn-sm" onclick="showApiKey('${d.api_key}')">
-                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 2l-2 2m-1-1l-3 3m2 2l-3 3m2 2l-3 3M3 21l9-9"/></svg>
-                            Clé & envoi
-                        </button>
-                        <button class="btn-icon" onclick="deleteDevice('${d.id}')" title="Supprimer">
+                        <button class="btn-icon" onclick="deleteDevice('${d.id}')" title="Supprimer cet appareil">
                             <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         </button>
                     </div>
@@ -585,12 +621,12 @@ function toggleTheme() {
         label.textContent = 'Thème sombre';
         // Icone lune
         icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
-        localStorage.setItem('sentinelle_theme', 'light');
+        localStorage.setItem('Acoustic&Vibration_theme', 'light');
     } else {
         label.textContent = 'Thème clair';
         // Icone soleil
         icon.innerHTML = '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>';
-        localStorage.setItem('sentinelle_theme', 'dark');
+        localStorage.setItem('Acoustic&Vibration_theme', 'dark');
     }
 
     // Réinitialiser le dégradé du graphique selon le thème
@@ -601,7 +637,7 @@ function toggleTheme() {
 
 // Restaurer la préférence de thème au chargement
 (function checkSavedTheme() {
-    if (localStorage.getItem('sentinelle_theme') === 'light') {
+    if (localStorage.getItem('Acoustic&Vibration_theme') === 'light') {
         document.body.classList.add('light-theme');
         const label = document.getElementById('themeLabel');
         const icon = document.getElementById('themeIcon');

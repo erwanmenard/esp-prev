@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: site_raspberry_son_vibration
+    name: Acoustic&Vibration
     runtime: node
     buildCommand: npm install
     startCommand: node server.js
