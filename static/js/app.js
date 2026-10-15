@@ -33,6 +33,10 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(() => {
         if (currentView === 'dashboard') {
             loadDashboard();
+        } else if (currentView === 'devices') {
+            loadDevices();
+        } else if (currentView === 'alerts') {
+            loadAlerts();
         }
     }, 4000);
 });
@@ -192,29 +196,32 @@ async function loadDashboard() {
     }
 }
 
+let activeDeviceName = '';
+
 function renderLatestCards(cards) {
     const grid = document.getElementById('latestValuesGrid');
     if (!cards || cards.length === 0) {
-        grid.innerHTML = '<div class="empty-state">Aucune mesure reçue pour l\'instant.</div>';
+        grid.innerHTML = '<div class="empty-state">En attente des mesures envoyées par le Raspberry Pi...</div>';
+        renderHistoryPills('Appareil');
         return;
     }
 
-    // On affiche les cartes pour le premier appareil disponible
-    const first = cards[0];
-    activeDeviceId = first.device_id;
+    // On sélectionne l'appareil actif
+    const activeCard = (activeDeviceName ? cards.find(c => c.device_name === activeDeviceName) : null) || cards[0];
+    activeDeviceName = activeCard.device_name;
 
     const items = [
-        { key: 'vibration_peak', val: first.vibration_pic, label: 'Vibration pic', unit: 'm/s²' },
-        { key: 'sound_mean', val: first.sound_moyenne, label: 'Sound moyenne', unit: 'raw' },
-        { key: 'vibration_mean', val: first.vibration_moyenne, label: 'Vibration moyenne', unit: 'm/s²' },
-        { key: 'sound_peak', val: first.sound_peak, label: 'Sound peak', unit: 'raw' }
+        { key: 'vibration_peak', val: activeCard.vibration_pic, label: 'Vibration pic', unit: 'm/s²' },
+        { key: 'sound_mean', val: activeCard.sound_moyenne, label: 'Sound moyenne', unit: 'raw' },
+        { key: 'vibration_mean', val: activeCard.vibration_moyenne, label: 'Vibration moyenne', unit: 'm/s²' },
+        { key: 'sound_peak', val: activeCard.sound_peak, label: 'Sound peak', unit: 'raw' }
     ];
 
     grid.innerHTML = items.map(item => `
         <div class="metric-card">
             <div class="metric-top">
-                <span>${first.device_name}</span>
-                <span class="metric-time">${first.time_display}</span>
+                <span>${activeCard.device_name}</span>
+                <span class="metric-time">${activeCard.time_display}</span>
             </div>
             <div class="metric-main">
                 <span class="metric-number">${formatNumber(item.val)}</span>
@@ -224,7 +231,7 @@ function renderLatestCards(cards) {
         </div>
     `).join('');
 
-    renderHistoryPills(first.device_name);
+    renderHistoryPills(activeCard.device_name);
 }
 
 function renderHistoryPills(deviceName) {
@@ -257,8 +264,8 @@ function selectHistoryMetric(metric) {
 async function loadHistory() {
     try {
         let url = `/api/telemetry/history?metric=${activeHistoryMetric}&limit=200`;
-        if (activeDeviceId) {
-            url += `&device_id=${activeDeviceId}`;
+        if (activeDeviceName) {
+            url += `&device_name=${encodeURIComponent(activeDeviceName)}`;
         }
         const res = await fetch(url);
         const data = await res.json();
@@ -278,7 +285,7 @@ async function loadDevices() {
         const res = await fetch('/api/devices');
         const devices = await res.json();
 
-        // Mettre a jour le select de seuils
+        // Mettre à jour le select de seuils
         const thSelect = document.getElementById('thDeviceSelect');
         if (thSelect) {
             thSelect.innerHTML = devices.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
@@ -286,7 +293,7 @@ async function loadDevices() {
 
         const list = document.getElementById('devicesList');
         if (devices.length === 0) {
-            list.innerHTML = '<div class="empty-state">Aucun appareil configuré.</div>';
+            list.innerHTML = '<div class="empty-state">Aucun appareil détecté. Démarrez un script Raspberry pour l\'enregistrer.</div>';
             return;
         }
 
@@ -299,19 +306,15 @@ async function loadDevices() {
                             <div class="device-title-row">
                                 <span class="status-dot ${isOnline ? 'online' : ''}"></span>
                                 <span class="device-name">${d.name}</span>
-                                <span class="type-tag">${d.connection_type || 'WiFi'}</span>
+                                ${formatConnectionTag(d.connection_type)}
                             </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" ${d.is_active ? 'checked' : ''} onchange="toggleDeviceActive(${d.id}, this.checked)">
-                                <span class="slider"></span>
-                            </label>
                         </div>
                         <div class="device-location">
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                             ${d.location || 'Emplacement non précisé'}
                         </div>
                         <div class="device-status-text">
-                            ${isOnline ? '<span style="color:#10b981;">En ligne</span>' : 'Hors ligne'} · dernière mesure ${d.last_seen || 'jamais'}
+                            ${isOnline ? '<span style="color:#10b981; font-weight:600;">● En ligne</span> · actif maintenant' : '<span style="color:#64748b;">○ Hors ligne</span>'} · dernière mesure : ${d.last_seen || 'jamais'}
                         </div>
                     </div>
                     <div class="device-actions">
@@ -319,7 +322,7 @@ async function loadDevices() {
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 2l-2 2m-1-1l-3 3m2 2l-3 3m2 2l-3 3M3 21l9-9"/></svg>
                             Clé & envoi
                         </button>
-                        <button class="btn-icon" onclick="deleteDevice(${d.id})" title="Supprimer">
+                        <button class="btn-icon" onclick="deleteDevice('${d.id}')" title="Supprimer">
                             <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         </button>
                     </div>
@@ -530,6 +533,15 @@ function copyApiKey() {
 function formatNumber(num) {
     if (num === null || num === undefined) return '0';
     return Number(num).toLocaleString('fr-FR', { maximumFractionDigits: 2 });
+}
+
+function formatConnectionTag(type) {
+    if (!type) return '<span class="type-tag">📶 4G</span>';
+    const t = type.toLowerCase();
+    if (t.includes('wifi') || t.includes('wi-fi')) return '<span class="type-tag">📡 WiFi</span>';
+    if (t.includes('eth')) return '<span class="type-tag">🔌 Ethernet</span>';
+    if (t.includes('4g')) return '<span class="type-tag">📶 4G</span>';
+    return `<span class="type-tag">📶 ${type}</span>`;
 }
 
 // -------------------------------------------------------------
