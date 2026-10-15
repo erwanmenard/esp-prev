@@ -1,0 +1,602 @@
+// ==========================================================================
+// SENTINELLE - LOGIQUE CLIENT JAVASCRIPT
+// ==========================================================================
+
+let currentView = 'dashboard';
+let activeHistoryMetric = 'vibration_peak';
+let activeDeviceId = null;
+let historyChart = null;
+let currentApiKey = '';
+let alertsFilter = 'open';
+
+// Dictionnaire des libellés et unités pour l'affichage
+const METRIC_CONFIG = {
+    'vibration_peak': { label: 'Vibration pic', unit: 'm/s²' },
+    'vibration_mean': { label: 'Vibration moyenne', unit: 'm/s²' },
+    'sound_peak': { label: 'Sound peak', unit: 'raw' },
+    'sound_mean': { label: 'Sound moyenne', unit: 'raw' },
+    'kurtosis': { label: 'Kurtosis (Chocs)', unit: '' },
+    'rms': { label: 'RMS Sonore', unit: 'raw' },
+    'anomaly_score': { label: 'Score anomalie IA', unit: '%' }
+};
+
+// Initialisation au chargement de la page
+document.addEventListener('DOMContentLoaded', () => {
+    initNavigation();
+    initChart();
+    loadDashboard();
+    loadDevices();
+    loadThresholds();
+    loadAlerts();
+
+    // Actualisation automatique toutes les 4 secondes
+    setInterval(() => {
+        if (currentView === 'dashboard') {
+            loadDashboard();
+        }
+    }, 4000);
+});
+
+// -------------------------------------------------------------
+// NAVIGATION ONGLETS
+// -------------------------------------------------------------
+function initNavigation() {
+    const navButtons = document.querySelectorAll('.nav-item');
+    navButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const viewTarget = btn.getAttribute('data-view');
+            switchView(viewTarget);
+        });
+    });
+}
+
+function switchView(viewName) {
+    currentView = viewName;
+
+    // Mise a jour des boutons
+    document.querySelectorAll('.nav-item').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-view') === viewName);
+    });
+
+    // Affichage de la vue
+    document.querySelectorAll('.content-view').forEach(v => {
+        v.classList.remove('active');
+    });
+
+    const activeSection = document.getElementById(`view-${viewName}`);
+    if (activeSection) {
+        activeSection.classList.add('active');
+    }
+
+    if (viewName === 'dashboard') {
+        loadDashboard();
+    } else if (viewName === 'devices') {
+        loadDevices();
+    } else if (viewName === 'alerts') {
+        loadThresholds();
+        loadAlerts();
+    }
+}
+
+// -------------------------------------------------------------
+// GRAPHIQUE HISTORIQUE (CHART.JS)
+// -------------------------------------------------------------
+function initChart() {
+    const ctx = document.getElementById('historyChart').getContext('2d');
+
+    // Dégradé sous la courbe
+    const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+    gradient.addColorStop(0, 'rgba(16, 185, 129, 0.25)');
+    gradient.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
+
+    historyChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Mesure',
+                data: [],
+                borderColor: '#10b981',
+                backgroundColor: gradient,
+                borderWidth: 2,
+                pointRadius: 0,
+                pointHoverRadius: 5,
+                pointHoverBackgroundColor: '#10b981',
+                pointHoverBorderColor: '#ffffff',
+                pointHoverBorderWidth: 2,
+                fill: true,
+                tension: 0.35
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: '#111724',
+                    titleColor: '#94a3b8',
+                    bodyColor: '#f8fafc',
+                    borderColor: '#1e293b',
+                    borderWidth: 1,
+                    padding: 10,
+                    displayColors: false,
+                    callbacks: {
+                        label: function(context) {
+                            const conf = METRIC_CONFIG[activeHistoryMetric] || { unit: '' };
+                            return `${context.parsed.y} ${conf.unit}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                    ticks: { color: '#64748b', maxTicksLimit: 8, font: { size: 11 } }
+                },
+                y: {
+                    grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                    ticks: { color: '#64748b', font: { size: 11 } }
+                }
+            }
+        }
+    });
+}
+
+function updateChart(labels, data, metricName) {
+    if (!historyChart) return;
+    historyChart.data.labels = labels;
+    historyChart.data.datasets[0].data = data;
+    historyChart.update('none'); // mise a jour sans saccade
+}
+
+// -------------------------------------------------------------
+// TABLEAU DE BORD : CHARGEMENT DES DONNÉES
+// -------------------------------------------------------------
+async function loadDashboard() {
+    try {
+        const response = await fetch('/api/telemetry/latest');
+        const data = await response.json();
+
+        // 1. Horodatage et badge
+        document.getElementById('lastSyncTime').textContent = data.last_sync;
+
+        // 2. Cartes KPI
+        document.getElementById('kpiDevices').textContent = data.kpis.devices_online_ratio;
+        document.getElementById('kpiSensors').textContent = data.kpis.sensors_tracked;
+        document.getElementById('kpiAlerts').textContent = data.kpis.open_alerts;
+
+        // 3. Bannière d'alerte
+        const banner = document.getElementById('alertBanner');
+        const bannerText = document.getElementById('alertBannerText');
+        if (data.alerts && data.alerts.length > 0) {
+            banner.className = 'alert-banner danger';
+            bannerText.textContent = `Alerte active : ${data.alerts[0].device_name} — ${METRIC_CONFIG[data.alerts[0].metric]?.label || data.alerts[0].metric} (${data.alerts[0].value})`;
+        } else {
+            banner.className = 'alert-banner normal';
+            bannerText.textContent = 'Aucune alerte active.';
+        }
+
+        // 4. Cartes des 4 dernières valeurs
+        renderLatestCards(data.cards);
+
+        // 5. Chargement de l'historique pour le graphique
+        loadHistory();
+
+    } catch (err) {
+        console.error("Erreur de synchronisation :", err);
+    }
+}
+
+function renderLatestCards(cards) {
+    const grid = document.getElementById('latestValuesGrid');
+    if (!cards || cards.length === 0) {
+        grid.innerHTML = '<div class="empty-state">Aucune mesure reçue pour l\'instant.</div>';
+        return;
+    }
+
+    // On affiche les cartes pour le premier appareil disponible
+    const first = cards[0];
+    activeDeviceId = first.device_id;
+
+    const items = [
+        { key: 'vibration_peak', val: first.vibration_pic, label: 'Vibration pic', unit: 'm/s²' },
+        { key: 'sound_mean', val: first.sound_moyenne, label: 'Sound moyenne', unit: 'raw' },
+        { key: 'vibration_mean', val: first.vibration_moyenne, label: 'Vibration moyenne', unit: 'm/s²' },
+        { key: 'sound_peak', val: first.sound_peak, label: 'Sound peak', unit: 'raw' }
+    ];
+
+    grid.innerHTML = items.map(item => `
+        <div class="metric-card">
+            <div class="metric-top">
+                <span>${first.device_name}</span>
+                <span class="metric-time">${first.time_display}</span>
+            </div>
+            <div class="metric-main">
+                <span class="metric-number">${formatNumber(item.val)}</span>
+                <span class="metric-unit">${item.unit}</span>
+            </div>
+            <div class="metric-label">${item.label}</div>
+        </div>
+    `).join('');
+
+    renderHistoryPills(first.device_name);
+}
+
+function renderHistoryPills(deviceName) {
+    const container = document.getElementById('historyFilterPills');
+    const pills = [
+        { metric: 'vibration_peak', label: `${deviceName} · Vibration pic` },
+        { metric: 'sound_mean', label: `${deviceName} · Sound moyenne` },
+        { metric: 'vibration_mean', label: `${deviceName} · Vibration moyenne` },
+        { metric: 'sound_peak', label: `${deviceName} · Sound peak` },
+        { metric: 'kurtosis', label: `${deviceName} · Kurtosis` },
+        { metric: 'rms', label: `${deviceName} · RMS` }
+    ];
+
+    container.innerHTML = pills.map(p => `
+        <button class="pill-btn ${p.metric === activeHistoryMetric ? 'active' : ''}" 
+                onclick="selectHistoryMetric('${p.metric}')">
+            ${p.label}
+        </button>
+    `).join('');
+}
+
+function selectHistoryMetric(metric) {
+    activeHistoryMetric = metric;
+    document.querySelectorAll('.pill-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.textContent.toLowerCase().includes(METRIC_CONFIG[metric]?.label.toLowerCase()));
+    });
+    loadHistory();
+}
+
+async function loadHistory() {
+    try {
+        let url = `/api/telemetry/history?metric=${activeHistoryMetric}&limit=200`;
+        if (activeDeviceId) {
+            url += `&device_id=${activeDeviceId}`;
+        }
+        const res = await fetch(url);
+        const data = await res.json();
+        
+        document.getElementById('historyPointsCount').textContent = `${data.count} points`;
+        updateChart(data.labels, data.values, activeHistoryMetric);
+    } catch (err) {
+        console.error("Erreur chargement historique :", err);
+    }
+}
+
+// -------------------------------------------------------------
+// VUE APPAREILS
+// -------------------------------------------------------------
+async function loadDevices() {
+    try {
+        const res = await fetch('/api/devices');
+        const devices = await res.json();
+
+        // Mettre a jour le select de seuils
+        const thSelect = document.getElementById('thDeviceSelect');
+        if (thSelect) {
+            thSelect.innerHTML = devices.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+        }
+
+        const list = document.getElementById('devicesList');
+        if (devices.length === 0) {
+            list.innerHTML = '<div class="empty-state">Aucun appareil configuré.</div>';
+            return;
+        }
+
+        list.innerHTML = devices.map(d => {
+            const isOnline = d.is_online;
+            return `
+                <div class="device-card">
+                    <div>
+                        <div class="device-header">
+                            <div class="device-title-row">
+                                <span class="status-dot ${isOnline ? 'online' : ''}"></span>
+                                <span class="device-name">${d.name}</span>
+                                <span class="type-tag">${d.connection_type || 'WiFi'}</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input type="checkbox" ${d.is_active ? 'checked' : ''} onchange="toggleDeviceActive(${d.id}, this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                        <div class="device-location">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                            ${d.location || 'Emplacement non précisé'}
+                        </div>
+                        <div class="device-status-text">
+                            ${isOnline ? '<span style="color:#10b981;">En ligne</span>' : 'Hors ligne'} · dernière mesure ${d.last_seen || 'jamais'}
+                        </div>
+                    </div>
+                    <div class="device-actions">
+                        <button class="btn btn-secondary btn-sm" onclick="showApiKey('${d.api_key}')">
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 2l-2 2m-1-1l-3 3m2 2l-3 3m2 2l-3 3M3 21l9-9"/></svg>
+                            Clé & envoi
+                        </button>
+                        <button class="btn-icon" onclick="deleteDevice(${d.id})" title="Supprimer">
+                            <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        console.error("Erreur chargement appareils :", err);
+    }
+}
+
+async function handleCreateDevice(e) {
+    e.preventDefault();
+    const name = document.getElementById('newDeviceName').value;
+    const location = document.getElementById('newDeviceLocation').value;
+    const connection_type = document.getElementById('newDeviceType').value;
+
+    const res = await fetch('/api/devices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, location, connection_type })
+    });
+
+    if (res.ok) {
+        closeModal('modalAddDevice');
+        document.getElementById('newDeviceName').value = '';
+        document.getElementById('newDeviceLocation').value = '';
+        loadDevices();
+    } else {
+        const err = await res.json();
+        alert(err.error || "Erreur lors de la création");
+    }
+}
+
+async function toggleDeviceActive(id, isActive) {
+    await fetch(`/api/devices/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: isActive })
+    });
+}
+
+async function deleteDevice(id) {
+    if (confirm("Supprimer cet appareil et toutes ses mesures ?")) {
+        await fetch(`/api/devices/${id}`, { method: 'DELETE' });
+        loadDevices();
+        loadDashboard();
+    }
+}
+
+// -------------------------------------------------------------
+// VUE SEUILS & ALERTES
+// -------------------------------------------------------------
+async function loadThresholds() {
+    try {
+        const res = await fetch('/api/thresholds');
+        const thresholds = await res.json();
+        const list = document.getElementById('thresholdsList');
+
+        if (thresholds.length === 0) {
+            list.innerHTML = '<div class="empty-state">Aucun seuil défini. Ajoutez-en un ci-dessus.</div>';
+            return;
+        }
+
+        list.innerHTML = thresholds.map(t => {
+            const metricName = METRIC_CONFIG[t.metric]?.label || t.metric;
+            return `
+                <div class="threshold-item">
+                    <div class="th-left">
+                        <strong>${t.device_name} · ${metricName} ${t.condition} ${formatNumber(t.threshold_value)}</strong>
+                        <span>${t.is_active ? 'Surveillance active' : 'Surveillance désactivée'}</span>
+                    </div>
+                    <div class="th-right">
+                        <label class="toggle-switch">
+                            <input type="checkbox" ${t.is_active ? 'checked' : ''} onchange="toggleThresholdActive(${t.id}, this.checked)">
+                            <span class="slider"></span>
+                        </label>
+                        <button class="btn-icon" onclick="deleteThreshold(${t.id})" title="Supprimer">
+                            <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        console.error("Erreur chargement seuils :", err);
+    }
+}
+
+async function handleCreateThreshold(e) {
+    e.preventDefault();
+    const device_id = document.getElementById('thDeviceSelect').value;
+    const metric = document.getElementById('thMetricSelect').value;
+    const condition = document.getElementById('thConditionSelect').value;
+    const threshold_value = document.getElementById('thValueInput').value;
+
+    const res = await fetch('/api/thresholds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id, metric, condition, threshold_value })
+    });
+
+    if (res.ok) {
+        document.getElementById('thValueInput').value = '';
+        loadThresholds();
+    }
+}
+
+async function toggleThresholdActive(id, isActive) {
+    await fetch(`/api/thresholds/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: isActive })
+    });
+    loadThresholds();
+}
+
+async function deleteThreshold(id) {
+    if (confirm("Supprimer cette règle de seuil ?")) {
+        await fetch(`/api/thresholds/${id}`, { method: 'DELETE' });
+        loadThresholds();
+    }
+}
+
+// ALERTES
+async function loadAlerts() {
+    try {
+        const url = alertsFilter === 'open' ? '/api/alerts?status=open' : '/api/alerts';
+        const res = await fetch(url);
+        const alerts = await res.json();
+        const list = document.getElementById('alertsList');
+
+        if (alerts.length === 0) {
+            list.innerHTML = `
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2.5" fill="none"><polyline points="20 6 9 17 4 12"/></svg>
+                    Aucune alerte à afficher pour le moment.
+                </div>
+            `;
+            return;
+        }
+
+        list.innerHTML = alerts.map(a => {
+            const metricName = METRIC_CONFIG[a.metric]?.label || a.metric;
+            const isResolved = a.status === 'resolved';
+            return `
+                <div class="alert-row ${isResolved ? 'resolved' : ''}">
+                    <div>
+                        <strong style="color:${isResolved ? '#94a3b8' : '#ef4444'};">
+                            ${a.device_name} — Dépassement de seuil (${metricName})
+                        </strong>
+                        <div style="font-size:0.8rem; color:#64748b; margin-top:2px;">
+                            Valeur relevée : ${formatNumber(a.value)} (${a.condition} ${formatNumber(a.threshold_value)}) · ${a.timestamp}
+                        </div>
+                    </div>
+                    <div>
+                        ${!isResolved ? `
+                            <button class="btn btn-secondary btn-sm" onclick="resolveAlert(${a.id})">
+                                Acquitter
+                            </button>
+                        ` : '<span style="font-size:0.8rem; color:#10b981;">Acquittée</span>'}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        console.error("Erreur chargement alertes :", err);
+    }
+}
+
+function filterAlerts(filter) {
+    alertsFilter = filter;
+    document.getElementById('tabAlertsOpen').classList.toggle('active', filter === 'open');
+    document.getElementById('tabAlertsAll').classList.toggle('active', filter === 'all');
+    loadAlerts();
+}
+
+async function resolveAlert(id) {
+    await fetch(`/api/alerts/${id}/resolve`, { method: 'POST' });
+    loadAlerts();
+    loadDashboard();
+}
+
+// -------------------------------------------------------------
+// MODALES & UTILITAIRES
+// -------------------------------------------------------------
+function openAddDeviceModal() {
+    document.getElementById('modalAddDevice').classList.remove('hidden');
+}
+
+function closeModal(id) {
+    document.getElementById(id).classList.add('hidden');
+}
+
+function showApiKey(key) {
+    currentApiKey = key;
+    document.getElementById('displayApiKey').textContent = key;
+    document.querySelectorAll('.code-key-placeholder').forEach(el => el.textContent = key);
+    document.getElementById('modalApiKey').classList.remove('hidden');
+}
+
+function copyApiKey() {
+    navigator.clipboard.writeText(currentApiKey).then(() => {
+        alert("Clé API copiée dans le presse-papier !");
+    });
+}
+
+function formatNumber(num) {
+    if (num === null || num === undefined) return '0';
+    return Number(num).toLocaleString('fr-FR', { maximumFractionDigits: 2 });
+}
+
+// -------------------------------------------------------------
+// MENU UTILISATEUR & GESTION DU THÈME (CAPTURE D'ÉCRAN 5)
+// -------------------------------------------------------------
+function toggleUserMenu() {
+    const popup = document.getElementById('userMenuPopup');
+    if (popup) {
+        popup.classList.toggle('hidden');
+    }
+}
+
+// Fermer le menu si clic en dehors
+document.addEventListener('click', (e) => {
+    const popup = document.getElementById('userMenuPopup');
+    const userPill = document.querySelector('.user-pill.clickable');
+    if (popup && !popup.classList.contains('hidden')) {
+        if (!popup.contains(e.target) && !userPill.contains(e.target)) {
+            popup.classList.add('hidden');
+        }
+    }
+});
+
+function handleMenuClick(action) {
+    const popup = document.getElementById('userMenuPopup');
+    if (popup) popup.classList.add('hidden');
+
+    if (action === 'devices') {
+        switchView('devices');
+    } else if (action === 'alerts') {
+        switchView('alerts');
+    }
+}
+
+function toggleTheme() {
+    const isLight = document.body.classList.toggle('light-theme');
+    const label = document.getElementById('themeLabel');
+    const icon = document.getElementById('themeIcon');
+
+    if (isLight) {
+        label.textContent = 'Thème sombre';
+        // Icone lune
+        icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+        localStorage.setItem('sentinelle_theme', 'light');
+    } else {
+        label.textContent = 'Thème clair';
+        // Icone soleil
+        icon.innerHTML = '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>';
+        localStorage.setItem('sentinelle_theme', 'dark');
+    }
+
+    // Réinitialiser le dégradé du graphique selon le thème
+    if (historyChart) {
+        historyChart.update();
+    }
+}
+
+// Restaurer la préférence de thème au chargement
+(function checkSavedTheme() {
+    if (localStorage.getItem('sentinelle_theme') === 'light') {
+        document.body.classList.add('light-theme');
+        const label = document.getElementById('themeLabel');
+        const icon = document.getElementById('themeIcon');
+        if (label && icon) {
+            label.textContent = 'Thème sombre';
+            icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+        }
+    }
+})();
+

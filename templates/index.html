@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentinelle — Centre de contrôle</title>
+    <!-- Polices & Icônes (Feather Icons ou SVG natifs légers) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chart.js pour des graphiques fluides et légers -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <!-- Feuille de style principale -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- BARRE LATERALE (SIDEBAR) -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-icon">
+                    <!-- Icone pulsation radio / sentinelle -->
+                    <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/>
+                        <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/>
+                        <circle cx="12" cy="12" r="2"/>
+                        <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/>
+                        <path d="M19.1 4.9C23 8.8 23 15.2 19.1 19.1"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <h2>Sentinelle</h2>
+                    <span>Centre de contrôle</span>
+                </div>
+            </div>
+
+            <!-- NAVIGATION -->
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-view="dashboard">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                        <rect x="3" y="3" width="7" height="7" rx="1"/>
+                        <rect x="14" y="3" width="7" height="7" rx="1"/>
+                        <rect x="14" y="14" width="7" height="7" rx="1"/>
+                        <rect x="3" y="14" width="7" height="7" rx="1"/>
+                    </svg>
+                    <span>Tableau de bord</span>
+                </button>
+
+                <button class="nav-item" data-view="devices">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                        <rect x="4" y="4" width="16" height="16" rx="2"/>
+                        <rect x="9" y="9" width="6" height="6"/>
+                        <line x1="9" y1="1" x2="9" y2="4"/>
+                        <line x1="15" y1="1" x2="15" y2="4"/>
+                        <line x1="9" y1="20" x2="9" y2="23"/>
+                        <line x1="15" y1="20" x2="15" y2="23"/>
+                        <line x1="20" y1="9" x2="23" y2="9"/>
+                        <line x1="20" y1="14" x2="23" y2="14"/>
+                        <line x1="1" y1="9" x2="4" y2="9"/>
+                        <line x1="1" y1="14" x2="4" y2="14"/>
+                    </svg>
+                    <span>Appareils</span>
+                </button>
+
+                <button class="nav-item" data-view="alerts">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none">
+                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                    </svg>
+                    <span>Seuils & alertes</span>
+                </button>
+            </nav>
+
+            <!-- PIED DE SIDEBAR AVEC MENU D'OPTIONS ET THÈME -->
+            <div class="sidebar-footer">
+                <!-- POPUP DU MENU D'OPTIONS -->
+                <div id="userMenuPopup" class="user-menu-popup hidden">
+                    <div class="popup-items">
+                        <button class="popup-item" onclick="handleMenuClick('devices')">
+                            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>
+                            <span>Mes appareils</span>
+                        </button>
+                        <button class="popup-item" onclick="handleMenuClick('alerts')">
+                            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                            <span>Seuils & alertes</span>
+                        </button>
+                        <button class="popup-item" id="themeToggleBtn" onclick="toggleTheme()">
+                            <svg id="themeIcon" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                            <span id="themeLabel">Thème clair</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- BOUTON DÉCLENCHEUR DU MENU -->
+                <div class="user-pill clickable" onclick="toggleUserMenu()">
+                    <div class="user-avatar">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                        </svg>
+                    </div>
+                    <div class="user-info">
+                        <strong>Options & Thème</strong>
+                        <span>Accès libre</span>
+                    </div>
+                    <div class="user-chevron">
+                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="7 15 12 20 17 15"/><polyline points="7 9 12 4 17 9"/></svg>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- ZONE DE CONTENU PRINCIPAL -->
+        <main class="main-content">
+            
+            <!-- VUE 1 : TABLEAU DE BORD -->
+            <section id="view-dashboard" class="content-view active">
+                <header class="view-header">
+                    <div class="header-titles">
+                        <h1>Tableau de bord</h1>
+                        <p>Les mesures reçues de tous vos appareils, en WiFi comme en Bluetooth / 4G, actualisées en temps réel.</p>
+                        <div class="sync-status">
+                            <span>Dernière synchronisation à <span id="lastSyncTime">--:--:--</span></span>
+                            <div class="live-badge">
+                                <span class="dot"></span> En direct
+                            </div>
+                        </div>
+                    </div>
+                </header>
+
+                <!-- BANNIÈRE D'ALERTE -->
+                <div id="alertBanner" class="alert-banner normal">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2.5" fill="none">
+                        <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                    <span id="alertBannerText">Aucune alerte active.</span>
+                </div>
+
+                <!-- 3 CARTES KPI -->
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <div class="kpi-icon">
+                            <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
+                                <rect x="4" y="4" width="16" height="16" rx="2"/>
+                                <rect x="9" y="9" width="6" height="6"/>
+                            </svg>
+                        </div>
+                        <div class="kpi-body">
+                            <div class="kpi-value" id="kpiDevices">0 / 0</div>
+                            <div class="kpi-label">Appareils en ligne</div>
+                        </div>
+                    </div>
+
+                    <div class="kpi-card">
+                        <div class="kpi-icon">
+                            <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
+                                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+                            </svg>
+                        </div>
+                        <div class="kpi-body">
+                            <div class="kpi-value" id="kpiSensors">4</div>
+                            <div class="kpi-label">Capteurs suivis</div>
+                        </div>
+                    </div>
+
+                    <div class="kpi-card">
+                        <div class="kpi-icon">
+                            <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none">
+                                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                                <line x1="12" y1="9" x2="12" y2="13"/>
+                                <line x1="12" y1="17" x2="12.01" y2="17"/>
+                            </svg>
+                        </div>
+                        <div class="kpi-body">
+                            <div class="kpi-value" id="kpiAlerts">0</div>
+                            <div class="kpi-label">Alertes ouvertes</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SECTION DERNIÈRES VALEURS -->
+                <div class="section-container">
+                    <div class="section-title">DERNIÈRES VALEURS</div>
+                    <div id="latestValuesGrid" class="cards-grid">
+                        <!-- Rempli dynamiquement en JS -->
+                    </div>
+                </div>
+
+                <!-- SECTION HISTORIQUE -->
+                <div class="section-container">
+                    <div class="history-header">
+                        <div class="section-title">HISTORIQUE</div>
+                        <div class="points-badge" id="historyPointsCount">200 points</div>
+                    </div>
+
+                    <!-- BOUTONS FILTRES HISTORIQUE -->
+                    <div class="pills-row" id="historyFilterPills">
+                        <!-- Rempli dynamiquement en JS -->
+                    </div>
+
+                    <!-- GRAPHIQUE INTERACTIF -->
+                    <div class="chart-box">
+                        <canvas id="historyChart"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <!-- VUE 2 : APPAREILS -->
+            <section id="view-devices" class="content-view">
+                <header class="view-header flex-header">
+                    <div class="header-titles">
+                        <h1>Appareils</h1>
+                        <p>Capteurs, ESP32, Arduino, ordinateurs ou Raspberry Pi : chaque appareil se lie en WiFi ou 4G. Ouvrez « Clé & envoi » pour le mettre en service.</p>
+                    </div>
+                    <button class="btn btn-primary" onclick="openAddDeviceModal()">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.5" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        Ajouter un appareil
+                    </button>
+                </header>
+
+                <div id="devicesList" class="devices-grid">
+                    <!-- Rempli dynamiquement en JS -->
+                </div>
+            </section>
+
+            <!-- VUE 3 : SEUILS & ALERTES -->
+            <section id="view-alerts" class="content-view">
+                <header class="view-header">
+                    <div class="header-titles">
+                        <h1>Seuils & alertes</h1>
+                        <p>Définissez les limites à ne pas dépasser : dès qu'une mesure les franchit, une alerte est créée automatiquement.</p>
+                    </div>
+                </header>
+
+                <!-- SECTION CRÉATION DE SEUIL -->
+                <div class="section-container">
+                    <div class="section-title">SEUILS SURVEILLÉS</div>
+                    
+                    <div class="card form-card">
+                        <form id="thresholdForm" onsubmit="handleCreateThreshold(event)" class="threshold-form">
+                            <div class="form-group">
+                                <label>Appareil</label>
+                                <select id="thDeviceSelect" required>
+                                    <!-- Options appareils -->
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Mesure</label>
+                                <select id="thMetricSelect" required>
+                                    <option value="sound_peak">Sound peak (Bruit de pointe)</option>
+                                    <option value="sound_mean">Sound moyenne (Bruit moyen)</option>
+                                    <option value="vibration_peak">Vibration pic (m/s²)</option>
+                                    <option value="vibration_mean">Vibration moyenne (m/s²)</option>
+                                    <option value="kurtosis">Kurtosis (Indicateur de chocs)</option>
+                                    <option value="rms">RMS (Volume sonore global)</option>
+                                    <option value="anomaly_score">Score d'anomalie IA (%)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Condition</label>
+                                <select id="thConditionSelect" required>
+                                    <option value="supérieur à">supérieur à</option>
+                                    <option value="inférieur à">inférieur à</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Seuil</label>
+                                <input type="number" id="thValueInput" step="any" placeholder="Ex: 70" required />
+                            </div>
+
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.5" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                    Créer le seuil
+                                </button>
+                            </div>
+                        </form>
+                        <div class="form-helper">
+                            Les mesures surveillées comparent chaque seconde les données reçues de votre machine.
+                        </div>
+                    </div>
+
+                    <!-- LISTE DES SEUILS ACTIFS -->
+                    <div id="thresholdsList" class="thresholds-items-list">
+                        <!-- Rempli en JS -->
+                    </div>
+                </div>
+
+                <!-- SECTION ALERTES DÉCLENCHÉES -->
+                <div class="section-container">
+                    <div class="history-header">
+                        <div class="section-title">ALERTES DÉCLENCHÉES</div>
+                        <div class="filter-tabs">
+                            <button class="tab-btn active" id="tabAlertsOpen" onclick="filterAlerts('open')">Ouvertes</button>
+                            <button class="tab-btn" id="tabAlertsAll" onclick="filterAlerts('all')">Toutes</button>
+                        </div>
+                    </div>
+
+                    <div id="alertsList" class="alerts-container">
+                        <!-- Rempli en JS -->
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- MODAL : AJOUTER UN APPAREIL -->
+    <div id="modalAddDevice" class="modal-overlay hidden">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Ajouter un appareil</h3>
+                <button class="close-btn" onclick="closeModal('modalAddDevice')">&times;</button>
+            </div>
+            <form onsubmit="handleCreateDevice(event)">
+                <div class="form-group">
+                    <label>Nom de l'appareil / Machine</label>
+                    <input type="text" id="newDeviceName" placeholder="Ex: Local 67 - CTA Nord" required>
+                </div>
+                <div class="form-group">
+                    <label>Emplacement physique</label>
+                    <input type="text" id="newDeviceLocation" placeholder="Ex: Toiture Bâtiment A">
+                </div>
+                <div class="form-group">
+                    <label>Type de liaison</label>
+                    <select id="newDeviceType">
+                        <option value="4G / Raspberry">4G / Raspberry Pi</option>
+                        <option value="WiFi">WiFi</option>
+                        <option value="ESP-NOW">ESP-NOW</option>
+                    </select>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('modalAddDevice')">Annuler</button>
+                    <button type="submit" class="btn btn-primary">Enregistrer</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL : CLÉ & ENVOI POUR LE RASPBERRY -->
+    <div id="modalApiKey" class="modal-overlay hidden">
+        <div class="modal-dialog modal-large">
+            <div class="modal-header">
+                <h3>Liaison de l'appareil & Clé API</h3>
+                <button class="close-btn" onclick="closeModal('modalApiKey')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Voici la clé d'identification secrète pour cet appareil. Utilisez-la dans votre script Python sur le Raspberry Pi :</p>
+                
+                <div class="key-box">
+                    <code id="displayApiKey">Chargement...</code>
+                    <button class="btn btn-sm btn-secondary" onclick="copyApiKey()">Copier</button>
+                </div>
+
+                <h4>Exemple de requête Python sur le Raspberry Pi :</h4>
+                <pre class="code-preview"><code>import requests
+
+data = {
+    "api_key": "<span class="code-key-placeholder">VOTRE_CLE</span>",
+    "vibration_peak": 1.95,
+    "vibration_mean": 0.17,
+    "sound_peak": 529.9,
+    "sound_mean": 137.1,
+    "kurtosis": 2.8,
+    "rms": 1.12
+}
+
+# Adresse locale ou Render
+url = "https://votre-site.onrender.com/api/telemetry"
+response = requests.post(url, json=data)
+print("Statut:", response.status_code)</code></pre>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" onclick="closeModal('modalApiKey')">Fermer</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script JavaScript applicatif -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

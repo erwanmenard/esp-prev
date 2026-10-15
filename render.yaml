@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: site_raspberry_son_vibration
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    plan: free
