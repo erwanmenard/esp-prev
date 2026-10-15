@@ -58,57 +58,12 @@ try {
 }
 
 // -------------------------------------------------------------
-// DONNÉES EN MÉMOIRE (MODE SECOURS SI PAS ENCORE DE CLÉ)
+// DONNÉES EN MÉMOIRE (MODE SECOURS SI PAS DE FIREBASE)
 // -------------------------------------------------------------
-let localDevices = [
-    {
-        id: "loc67",
-        name: "Local 67",
-        location: "Emplacement non précisé",
-        connection_type: "WiFi",
-        api_key: "sentinelle_loc67_master",
-        is_active: 1,
-        last_seen: new Date().toISOString().replace('T', ' ').substring(0, 19)
-    }
-];
-
-let localThresholds = [
-    {
-        id: "th1",
-        device_id: "loc67",
-        device_name: "Local 67",
-        metric: "sound_peak",
-        condition: "supérieur à",
-        threshold_value: 2000.0,
-        is_active: 1
-    }
-];
-
+let localDevices = [];
+let localThresholds = [];
 let localTelemetry = [];
 let localAlerts = [];
-
-// Données de démonstration initiales
-(function initDemoData() {
-    const now = Date.now();
-    for (let i = 40; i >= 0; i--) {
-        const t = new Date(now - i * 30000);
-        const tStr = t.toISOString().replace('T', ' ').substring(0, 19);
-        const vib_peak = (i === 1) ? 1.95 : (i === 20 ? 1.25 : +(0.05 + (i % 5) * 0.02).toFixed(2));
-        localTelemetry.push({
-            id: "tel_" + (localTelemetry.length + 1),
-            device_name: "Local 67",
-            timestamp: tStr,
-            vibration_peak: vib_peak,
-            vibration_mean: 0.17,
-            sound_peak: (i === 1) ? 529.9 : +(150 + (i % 7) * 20).toFixed(1),
-            sound_mean: 137.1,
-            kurtosis: 2.8,
-            rms: 1.12,
-            anomaly_score: 12.0,
-            status: "NORMAL"
-        });
-    }
-})();
 
 // -------------------------------------------------------------
 // ROUTE PRINCIPALE
@@ -128,22 +83,16 @@ app.get('/api/devices', async (req, res) => {
             const data = snapshot.val() || {};
             const list = Object.keys(data).map(key => {
                 const item = data[key];
-                const lastSeenTime = item.last_seen ? new Date(item.last_seen).getTime() : 0;
-                return { id: key, ...item, is_online: (now - lastSeenTime) < 60000 };
+                const lastSeenTime = item.last_seen_ts || (item.last_seen ? new Date(item.last_seen.replace(' ', 'T')).getTime() : 0);
+                const is_online = (now - lastSeenTime) < 45000;
+                return { id: key, ...item, is_online };
             });
-            // Si aucun appareil dans Firebase, on insère le device par défaut
-            if (list.length === 0) {
-                const defaultDev = localDevices[0];
-                const ref = db.ref('devices').push();
-                await ref.set(defaultDev);
-                return res.json([{ id: ref.key, ...defaultDev, is_online: true }]);
-            }
             return res.json(list);
         }
 
         const devices = localDevices.map(d => {
-            const lastSeenTime = d.last_seen ? new Date(d.last_seen).getTime() : 0;
-            return { ...d, is_online: (now - lastSeenTime) < 60000 };
+            const lastSeenTime = d.last_seen_ts || (d.last_seen ? new Date(d.last_seen.replace(' ', 'T')).getTime() : 0);
+            return { ...d, is_online: (now - lastSeenTime) < 45000 };
         });
         res.json(devices);
     } catch (e) {
@@ -204,16 +153,20 @@ app.delete('/api/devices/:id', async (req, res) => {
 // -------------------------------------------------------------
 // API : TELEMETRIE (Raspberry Pi -> Serveur -> Firebase)
 // -------------------------------------------------------------
+// API : TELEMETRIE (Raspberry Pi -> Serveur -> Firebase)
+// -------------------------------------------------------------
 app.post('/api/telemetry', async (req, res) => {
     const data = req.body || {};
     const apiKey = req.headers['x-api-key'] || data.api_key;
-    const deviceName = data.device_name || "Local 67";
+    const deviceName = data.device_name ? data.device_name.trim() : "Appareil-1";
     const nowIso = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const nowTs = Date.now();
 
     const record = {
         device_name: deviceName,
         api_key: apiKey || "none",
         timestamp: nowIso,
+        timestamp_ts: nowTs,
         vibration_peak: parseFloat(data.vibration_peak || 0),
         vibration_mean: parseFloat(data.vibration_mean || 0),
         sound_peak: parseFloat(data.sound_peak || 0),
@@ -227,18 +180,39 @@ app.post('/api/telemetry', async (req, res) => {
     const alertsTriggered = [];
 
     if (isFirebaseConnected) {
-        // Enregistrer dans Firebase
+        // Enregistrer la mesure dans l'historique et dans la branche latest
         await db.ref('telemetry').push(record);
         await db.ref('latest/' + deviceName).set(record);
 
-        // Mettre à jour last_seen de l'appareil
+        // Mettre à jour ou créer automatiquement l'appareil dans /devices
         const devSnap = await db.ref('devices').once('value');
         const devVal = devSnap.val() || {};
+        let foundKey = null;
         for (const devKey of Object.keys(devVal)) {
             if (devVal[devKey].name === deviceName) {
-                await db.ref('devices/' + devKey).update({ last_seen: nowIso });
+                foundKey = devKey;
                 break;
             }
+        }
+
+        const connType = data.connection_type || "4G";
+        if (foundKey) {
+            const updates = { 
+                last_seen: nowIso,
+                last_seen_ts: nowTs
+            };
+            if (data.connection_type) updates.connection_type = data.connection_type;
+            await db.ref('devices/' + foundKey).update(updates);
+        } else {
+            await db.ref('devices').push({
+                name: deviceName,
+                location: "Emplacement non précisé",
+                connection_type: connType,
+                api_key: apiKey || "none",
+                is_active: 1,
+                last_seen: nowIso,
+                last_seen_ts: nowTs
+            });
         }
 
         // Vérification des seuils
@@ -246,7 +220,7 @@ app.post('/api/telemetry', async (req, res) => {
         const thVal = thSnap.val() || {};
         for (const k of Object.keys(thVal)) {
             const th = thVal[k];
-            if (!th.is_active) continue;
+            if (!th.is_active || (th.device_name && th.device_name !== deviceName)) continue;
             const val = record[th.metric];
             if (val !== undefined) {
                 let isExceeded = false;
@@ -268,11 +242,26 @@ app.post('/api/telemetry', async (req, res) => {
         }
     } else {
         // Mode mémoire local
-        const dev = localDevices.find(d => d.name === deviceName || d.api_key === apiKey);
-        if (dev) dev.last_seen = nowIso;
+        let dev = localDevices.find(d => d.name === deviceName);
+        if (dev) {
+            dev.last_seen = nowIso;
+            dev.last_seen_ts = nowTs;
+            if (data.connection_type) dev.connection_type = data.connection_type;
+        } else {
+            localDevices.push({
+                id: "dev_" + (localDevices.length + 1),
+                name: deviceName,
+                location: "Emplacement non précisé",
+                connection_type: data.connection_type || "4G",
+                api_key: apiKey || "none",
+                is_active: 1,
+                last_seen: nowIso,
+                last_seen_ts: nowTs
+            });
+        }
 
         localThresholds.forEach(th => {
-            if (!th.is_active) return;
+            if (!th.is_active || (th.device_name && th.device_name !== deviceName)) return;
             const val = record[th.metric];
             if (val !== undefined) {
                 let isExceeded = false;
@@ -310,9 +299,9 @@ app.post('/api/telemetry', async (req, res) => {
 app.get('/api/telemetry/latest', async (req, res) => {
     try {
         const now = Date.now();
-        let devices = localDevices;
-        let latest = localTelemetry[localTelemetry.length - 1] || {};
-        let openAlerts = localAlerts.filter(a => a.status === 'open');
+        let devices = [];
+        let latestMap = {};
+        let openAlerts = [];
 
         if (isFirebaseConnected) {
             // Lecture des appareils
@@ -320,36 +309,59 @@ app.get('/api/telemetry/latest', async (req, res) => {
             const devData = devSnap.val() || {};
             devices = Object.keys(devData).map(k => ({ id: k, ...devData[k] }));
 
-            // Lecture de la dernière mesure
-            const telSnap = await db.ref('telemetry').limitToLast(1).once('value');
-            const telData = telSnap.val() || {};
-            const keys = Object.keys(telData);
-            if (keys.length > 0) latest = telData[keys[0]];
+            // Lecture des dernières mesures (branche latest)
+            const latestSnap = await db.ref('latest').once('value');
+            latestMap = latestSnap.val() || {};
 
-            // Alertes ouvertes (lecture directe et filtrage en mémoire pour éviter le warning d'index)
+            // Si latest est vide, fallback sur la dernière mesure de telemetry
+            if (Object.keys(latestMap).length === 0) {
+                const telSnap = await db.ref('telemetry').limitToLast(1).once('value');
+                const telData = telSnap.val() || {};
+                const keys = Object.keys(telData);
+                if (keys.length > 0) {
+                    const lastRec = telData[keys[0]];
+                    latestMap[lastRec.device_name || "Appareil"] = lastRec;
+                }
+            }
+
+            // Alertes ouvertes
             const alSnap = await db.ref('alerts').once('value');
             const alData = alSnap.val() || {};
             openAlerts = Object.keys(alData)
                 .map(k => ({ id: k, ...alData[k] }))
                 .filter(a => a.status === 'open');
+        } else {
+            devices = localDevices;
+            if (localTelemetry.length > 0) {
+                const lastRec = localTelemetry[localTelemetry.length - 1];
+                latestMap[lastRec.device_name || "Appareil"] = lastRec;
+            }
+            openAlerts = localAlerts.filter(a => a.status === 'open');
         }
 
         let onlineCount = 0;
         devices.forEach(d => {
-            const lastSeen = d.last_seen ? new Date(d.last_seen).getTime() : 0;
-            if ((now - lastSeen) < 60000) onlineCount++;
+            const lastSeenTs = d.last_seen_ts || (d.last_seen ? new Date(d.last_seen.replace(' ', 'T')).getTime() : 0);
+            if ((now - lastSeenTs) < 45000) onlineCount++;
         });
 
         const cards = [];
-        if (devices.length > 0) {
-            const d = devices[0];
-            const mois = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
-            const dt = latest.timestamp ? new Date(latest.timestamp) : new Date();
-            const timeDisplay = `${dt.getDate()} ${mois[dt.getMonth()]}, ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
+        const mois = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
+
+        // Construire les cartes de mesures pour chaque appareil ayant des données
+        for (const devName of Object.keys(latestMap)) {
+            const latest = latestMap[devName];
+            if (!latest) continue;
+            let timeDisplay = latest.timestamp || "";
+            try {
+                const dt = new Date(latest.timestamp.replace(' ', 'T'));
+                if (!isNaN(dt.getTime())) {
+                    timeDisplay = `${dt.getDate()} ${mois[dt.getMonth()]}, ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`;
+                }
+            } catch (err) {}
 
             cards.push({
-                device_id: d.id,
-                device_name: d.name,
+                device_name: devName,
                 timestamp: latest.timestamp,
                 time_display: timeDisplay,
                 vibration_pic: latest.vibration_peak || 0,
@@ -392,6 +404,10 @@ app.get('/api/telemetry/history', async (req, res) => {
             const snap = await db.ref('telemetry').limitToLast(limit).once('value');
             const data = snap.val() || {};
             rows = Object.keys(data).map(k => data[k]);
+        }
+
+        if (req.query.device_name) {
+            rows = rows.filter(r => r.device_name === req.query.device_name);
         }
 
         const slice = rows.slice(-limit);
