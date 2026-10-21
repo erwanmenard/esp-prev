@@ -3,7 +3,7 @@
 // ==========================================================================
 
 let currentView = 'dashboard';
-let activeHistoryMetric = 'vibration_peak';
+let activeHistoryMetric = 'anomaly_score';
 let activeDeviceId = null;
 let historyChart = null;
 let currentApiKey = '';
@@ -11,13 +11,12 @@ let alertsFilter = 'open';
 
 // Dictionnaire des libellés et unités pour l'affichage
 const METRIC_CONFIG = {
+    'anomaly_score': { label: 'Score anomalie IA', unit: 'pts' },
+    'anomaly_threshold': { label: 'Seuil Détection IA', unit: 'seuil' },
     'vibration_peak': { label: 'Vibration pic', unit: 'm/s²' },
     'vibration_mean': { label: 'Vibration moyenne', unit: 'm/s²' },
     'sound_peak': { label: 'Sound peak', unit: 'raw' },
-    'sound_mean': { label: 'Sound moyenne', unit: 'raw' },
-    'kurtosis': { label: 'Kurtosis (Chocs)', unit: '' },
-    'rms': { label: 'RMS Sonore', unit: 'raw' },
-    'anomaly_score': { label: 'Score anomalie IA', unit: '%' }
+    'sound_mean': { label: 'Sound moyenne', unit: 'raw' }
 };
 
 // Initialisation au chargement de la page
@@ -246,21 +245,22 @@ function renderLatestCards(cards) {
     const activeCard = (activeDeviceName ? cards.find(c => c.device_name === activeDeviceName) : null) || cards[0];
     activeDeviceName = activeCard.device_name;
 
+    const isAlert = (activeCard.status === 'ALERTE' || activeCard.anomaly_score >= (activeCard.anomaly_threshold || 8.0));
     const items = [
-        { key: 'vibration_peak', val: activeCard.vibration_pic, label: 'Vibration pic', unit: 'm/s²' },
-        { key: 'sound_mean', val: activeCard.sound_moyenne, label: 'Sound moyenne', unit: 'raw' },
-        { key: 'vibration_mean', val: activeCard.vibration_moyenne, label: 'Vibration moyenne', unit: 'm/s²' },
-        { key: 'sound_peak', val: activeCard.sound_peak, label: 'Sound peak', unit: 'raw' }
+        { key: 'anomaly_score', val: activeCard.anomaly_score, label: 'Score IA actuel', unit: 'pts', alert: isAlert },
+        { key: 'anomaly_threshold', val: activeCard.anomaly_threshold || 8.0, label: 'Seuil Détection IA', unit: 'seuil' },
+        { key: 'status', val: isAlert ? '🚨 ALERTE' : '✅ NORMAL', label: 'Statut Détection', unit: '', isStatus: true, alert: isAlert },
+        { key: 'connection_type', val: activeCard.connection_type || '4G LTE', label: 'Liaison Réseau', unit: '', isConn: true }
     ];
 
     grid.innerHTML = items.map(item => `
-        <div class="metric-card">
+        <div class="metric-card ${item.alert ? 'alert-active' : ''}">
             <div class="metric-top">
                 <span>${activeCard.device_name}</span>
                 <span class="metric-time">${formatCardDateTime(activeCard.timestamp)}</span>
             </div>
             <div class="metric-main">
-                <span class="metric-number">${formatNumber(item.val)}</span>
+                <span class="metric-number ${item.alert ? 'text-danger' : ''}">${typeof item.val === 'number' ? formatNumber(item.val) : item.val}</span>
                 <span class="metric-unit">${item.unit}</span>
             </div>
             <div class="metric-label">${item.label}</div>
@@ -273,12 +273,8 @@ function renderLatestCards(cards) {
 function renderHistoryPills(deviceName) {
     const container = document.getElementById('historyFilterPills');
     const pills = [
-        { metric: 'vibration_peak', label: `${deviceName} · Vibration pic` },
-        { metric: 'sound_mean', label: `${deviceName} · Sound moyenne` },
-        { metric: 'vibration_mean', label: `${deviceName} · Vibration moyenne` },
-        { metric: 'sound_peak', label: `${deviceName} · Sound peak` },
-        { metric: 'kurtosis', label: `${deviceName} · Kurtosis` },
-        { metric: 'rms', label: `${deviceName} · RMS` }
+        { metric: 'anomaly_score', label: `${deviceName} · Score Anomalie IA (pts)` },
+        { metric: 'anomaly_threshold', label: `${deviceName} · Seuil Détection IA` }
     ];
 
     container.innerHTML = pills.map(p => `
@@ -354,7 +350,7 @@ async function loadDevices() {
                             ${d.location || 'Emplacement non précisé'}
                         </div>
                         <div class="device-status-text">
-                            ${isOnline ? '<span style="color:#10b981; font-weight:600;">● En ligne</span> · actif maintenant' : '<span style="color:#64748b;">○ Hors ligne</span>'} · dernière mesure : ${formatFullDateTime(d.last_seen_ts || d.last_seen)}
+                            ${isOnline ? '<span style="color:#10b981; font-weight:600;">● En ligne</span> · actif maintenant' : '<span style="color:#64748b;">○ Hors ligne</span>'} · dernière mesure : ${d.last_seen || (d.last_seen_ts ? formatFullDateTime(d.last_seen_ts) : 'jamais')}
                         </div>
                     </div>
                     <div class="device-actions">

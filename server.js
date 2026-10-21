@@ -119,19 +119,59 @@ app.get('/api/devices', async (req, res) => {
         if (isFirebaseConnected) {
             const snapshot = await db.ref('devices').once('value');
             const data = snapshot.val() || {};
-            const list = Object.keys(data).map(key => {
+            let list = Object.keys(data).map(key => {
                 const item = data[key];
                 const lastSeenTime = parseTsSafe(item.last_seen, item.last_seen_ts);
-                const is_online = (now - lastSeenTime) < 45000;
+                const is_online = (now - lastSeenTime) < 180000;
                 // SÉCURITÉ : Ne jamais renvoyer la clé secrète au frontend public
                 const { api_key, ...safeItem } = item;
                 return { 
                     id: key, 
                     ...safeItem, 
                     is_online,
-                    last_seen: formatParisFull(item.last_seen_ts || item.last_seen)
+                    last_seen_ts: lastSeenTime,
+                    last_seen: formatParisFull(lastSeenTime)
                 };
             });
+
+            // Détection automatique de TOUS les appareils récents dans /telemetry
+            const telSnap = await db.ref('telemetry').limitToLast(100).once('value');
+            const telData = telSnap.val() || {};
+            const seenDevices = {};
+            for (const k of Object.keys(telData)) {
+                const item = telData[k];
+                const dName = item.device_name || "ESP32_4G_Master";
+                const tTs = parseTsSafe(item.timestamp, item.timestamp_ts);
+                if (!seenDevices[dName] || tTs > seenDevices[dName].ts) {
+                    seenDevices[dName] = { item, ts: tTs };
+                }
+            }
+
+            for (const dName of Object.keys(seenDevices)) {
+                const { item, ts } = seenDevices[dName];
+                const is_online = (now - ts) < 180000;
+                const existing = list.find(d => d.name === dName || d.id === dName);
+                if (existing) {
+                    if (ts > (existing.last_seen_ts || 0)) {
+                        existing.is_online = is_online;
+                        existing.last_seen_ts = ts;
+                        existing.last_seen = formatParisFull(ts);
+                        if (item.connection_type) existing.connection_type = item.connection_type;
+                    }
+                } else {
+                    list.push({
+                        id: dName,
+                        name: dName,
+                        location: "Passerelle 4G LTE",
+                        connection_type: item.connection_type || "4G",
+                        is_active: 1,
+                        is_online: is_online,
+                        last_seen_ts: ts,
+                        last_seen: formatParisFull(ts)
+                    });
+                }
+            }
+
             return res.json(list);
         }
 
@@ -140,8 +180,9 @@ app.get('/api/devices', async (req, res) => {
             const { api_key, ...safeItem } = d;
             return { 
                 ...safeItem, 
-                is_online: (now - lastSeenTime) < 45000,
-                last_seen: formatParisFull(d.last_seen_ts || d.last_seen)
+                is_online: (now - lastSeenTime) < 180000,
+                last_seen_ts: lastSeenTime,
+                last_seen: formatParisFull(lastSeenTime)
             };
         });
         res.json(devices);
@@ -365,14 +406,16 @@ app.get('/api/telemetry/latest', async (req, res) => {
             const latestSnap = await db.ref('latest').once('value');
             latestMap = latestSnap.val() || {};
 
-            // Si latest est vide, fallback sur la dernière mesure de telemetry
-            if (Object.keys(latestMap).length === 0) {
-                const telSnap = await db.ref('telemetry').limitToLast(1).once('value');
-                const telData = telSnap.val() || {};
-                const keys = Object.keys(telData);
-                if (keys.length > 0) {
-                    const lastRec = telData[keys[0]];
-                    latestMap[lastRec.device_name || "Appareil"] = lastRec;
+            // Synchronisation avec les dernières mesures reçues dans /telemetry (pour inclure automatiquement les ESP32 4G)
+            const telSnap = await db.ref('telemetry').limitToLast(50).once('value');
+            const telData = telSnap.val() || {};
+            for (const k of Object.keys(telData)) {
+                const rec = telData[k];
+                const dName = rec.device_name || "ESP32_4G_Master";
+                const rTs = parseTsSafe(rec.timestamp, rec.timestamp_ts);
+                const curTs = latestMap[dName] ? parseTsSafe(latestMap[dName].timestamp, latestMap[dName].timestamp_ts) : 0;
+                if (!latestMap[dName] || rTs >= curTs) {
+                    latestMap[dName] = rec;
                 }
             }
 
@@ -391,10 +434,20 @@ app.get('/api/telemetry/latest', async (req, res) => {
             openAlerts = localAlerts.filter(a => a.status === 'open');
         }
 
+        if (devices.length === 0 && Object.keys(latestMap).length > 0) {
+            for (const dName of Object.keys(latestMap)) {
+                devices.push({
+                    name: dName,
+                    last_seen: latestMap[dName].timestamp,
+                    last_seen_ts: latestMap[dName].timestamp_ts
+                });
+            }
+        }
+
         let onlineCount = 0;
         devices.forEach(d => {
             const lastSeenTs = parseTsSafe(d.last_seen, d.last_seen_ts);
-            if ((now - lastSeenTs) < 45000) onlineCount++;
+            if ((now - lastSeenTs) < 60000) onlineCount++;
         });
 
         const cards = [];
@@ -408,20 +461,23 @@ app.get('/api/telemetry/latest', async (req, res) => {
                 device_name: devName,
                 timestamp: latest.timestamp_ts || latest.timestamp || "",
                 time_display: formatParisCard(latest.timestamp_ts || latest.timestamp),
+                anomaly_score: latest.anomaly_score !== undefined ? latest.anomaly_score : 0,
+                anomaly_threshold: latest.anomaly_threshold !== undefined ? latest.anomaly_threshold : 8.0,
+                status: latest.status || "NORMAL",
+                connection_type: latest.connection_type || "4G",
                 vibration_pic: latest.vibration_peak || 0,
                 vibration_moyenne: latest.vibration_mean || 0,
                 sound_peak: latest.sound_peak || 0,
                 sound_moyenne: latest.sound_mean || 0,
                 kurtosis: latest.kurtosis || 0,
-                rms: latest.rms || 0,
-                anomaly_score: latest.anomaly_score || 0
+                rms: latest.rms || 0
             });
         }
 
         res.json({
             kpis: {
                 devices_online_ratio: `${onlineCount} / ${devices.length}`,
-                sensors_tracked: devices.length * 4,
+                sensors_tracked: devices.length,
                 open_alerts: openAlerts.length
             },
             cards: cards,
@@ -437,7 +493,7 @@ app.get('/api/telemetry/latest', async (req, res) => {
 // API : HISTORIQUE POUR CHART.JS
 // -------------------------------------------------------------
 app.get('/api/telemetry/history', async (req, res) => {
-    const metric = req.query.metric || 'vibration_peak';
+    const metric = req.query.metric || 'anomaly_score';
     const limit = parseInt(req.query.limit || '200');
 
     try {
