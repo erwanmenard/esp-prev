@@ -299,9 +299,10 @@ function renderLatestCards(cards) {
         return;
     }
 
-    // On sélectionne l'appareil actif
-    const activeCard = (activeDeviceName ? cards.find(c => c.device_name === activeDeviceName) : null) || cards[0];
-    activeDeviceName = activeCard.device_name;
+    // On sélectionne l'appareil actif (supporte nom personnalisé ou identifiant brut)
+    const activeCard = (activeDeviceName ? cards.find(c => c.device_name === activeDeviceName || c.raw_device_name === activeDeviceName) : null) || cards[0];
+    activeDeviceName = activeCard.raw_device_name || activeCard.device_name;
+    const displayDeviceName = activeCard.device_name || activeCard.raw_device_name;
 
     const isAlert = (activeCard.status === 'ALERTE' || activeCard.anomaly_score >= (activeCard.anomaly_threshold || 8.0));
     const items = [
@@ -314,7 +315,7 @@ function renderLatestCards(cards) {
     grid.innerHTML = items.map(item => `
         <div class="metric-card ${item.alert ? 'alert-active' : ''}">
             <div class="metric-top">
-                <span>${activeCard.device_name}</span>
+                <span>${displayDeviceName}</span>
                 <span class="metric-time">${formatCardDateTime(activeCard.timestamp)}</span>
             </div>
             <div class="metric-main">
@@ -325,7 +326,7 @@ function renderLatestCards(cards) {
         </div>
     `).join('');
 
-    renderHistoryPills(activeCard.device_name);
+    renderHistoryPills(displayDeviceName);
 }
 
 function renderHistoryPills(deviceName) {

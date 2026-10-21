@@ -605,7 +605,32 @@ app.get('/api/telemetry/history', async (req, res) => {
         }
 
         if (req.query.device_name) {
-            rows = rows.filter(r => r.device_name === req.query.device_name);
+            const queryName = req.query.device_name.trim();
+            let matchedDev = null;
+            let targetMac = null;
+            let targetId = null;
+
+            if (isFirebaseConnected) {
+                const devSnap = await db.ref('devices').once('value');
+                const devData = devSnap.val() || {};
+                for (const k of Object.keys(devData)) {
+                    const d = devData[k];
+                    if (k === queryName || d.name === queryName || (d.mac && d.mac.toUpperCase() === queryName.toUpperCase())) {
+                        matchedDev = d;
+                        targetId = k;
+                        targetMac = d.mac;
+                        break;
+                    }
+                }
+            }
+
+            rows = rows.filter(r => {
+                if (r.device_name === queryName) return true;
+                if (targetId && r.device_name === targetId) return true;
+                if (targetMac && r.mac && r.mac.toUpperCase() === targetMac.toUpperCase()) return true;
+                if (matchedDev && matchedDev.name && r.device_name === matchedDev.name) return true;
+                return false;
+            });
         }
 
         const slice = rows.slice(-limit);
