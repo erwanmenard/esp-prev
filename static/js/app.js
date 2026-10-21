@@ -385,13 +385,24 @@ async function loadDevices() {
     }
 }
 
+function formatValidMac(str) {
+    if (!str) return "";
+    const clean = String(str).trim();
+    if (/^([0-9A-Fa-f]{2}[:_]){5}([0-9A-Fa-f]{2})$/.test(clean)) {
+        return clean.replace(/_/g, ':').toUpperCase();
+    }
+    return "";
+}
+
 function openEditDeviceModal(id) {
     const d = cachedDevices.find(item => String(item.id) === String(id));
     if (!d) return;
     currentEditingDevice = d;
 
+    const validMac = formatValidMac(d.mac) || formatValidMac(d.id);
+
     document.getElementById('editDeviceId').value = d.id;
-    document.getElementById('editDeviceMac').value = d.mac || (d.id.includes('_') ? d.id.replace(/_/g, ':') : d.id);
+    document.getElementById('editDeviceMac').value = validMac || (d.mac ? d.mac : "En attente de paquet ESP-NOW...");
     document.getElementById('editDeviceName').value = d.name || "";
     document.getElementById('editDeviceMachine').value = d.machine_name || "";
     document.getElementById('editDeviceLocation').value = d.location || "";
