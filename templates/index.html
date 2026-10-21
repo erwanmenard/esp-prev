@@ -207,15 +207,11 @@
 
             <!-- VUE 2 : APPAREILS -->
             <section id="view-devices" class="content-view">
-                <header class="view-header flex-header">
+                <header class="view-header">
                     <div class="header-titles">
                         <h1>Appareils</h1>
                         <p>Capteurs, ESP32, Arduino, ordinateurs ou Raspberry Pi : chaque appareil transmet ses mesures en continu par WiFi, Ethernet ou 4G.</p>
                     </div>
-                    <button class="btn btn-primary" onclick="openAddDeviceModal()">
-                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.5" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                        Ajouter un appareil
-                    </button>
                 </header>
 
                 <div id="devicesList" class="devices-grid">
@@ -306,33 +302,44 @@
         </main>
     </div>
 
-    <!-- MODAL : AJOUTER UN APPAREIL -->
-    <div id="modalAddDevice" class="modal-overlay hidden">
+    <!-- MODAL : MODIFIER UN APPAREIL -->
+    <div id="modalEditDevice" class="modal-overlay hidden">
         <div class="modal-dialog">
             <div class="modal-header">
-                <h3>Ajouter un appareil</h3>
-                <button class="close-btn" onclick="closeModal('modalAddDevice')">&times;</button>
+                <h3>Modifier l'appareil</h3>
+                <button class="close-btn" onclick="closeModal('modalEditDevice')">&times;</button>
             </div>
-            <form onsubmit="handleCreateDevice(event)">
+            <form onsubmit="handleUpdateDevice(event)">
+                <input type="hidden" id="editDeviceId">
                 <div class="form-group">
-                    <label>Nom de l'appareil / Machine</label>
-                    <input type="text" id="newDeviceName" placeholder="Ex: Local 67 - CTA Nord" required>
+                    <label>Adresse MAC (Identifiant matériel)</label>
+                    <input type="text" id="editDeviceMac" readonly style="opacity: 0.85; background: rgba(255,255,255,0.05); cursor: not-allowed; font-family: monospace;">
                 </div>
                 <div class="form-group">
-                    <label>Emplacement physique</label>
-                    <input type="text" id="newDeviceLocation" placeholder="Ex: Toiture Bâtiment A">
+                    <label>Nom de l'appareil</label>
+                    <input type="text" id="editDeviceName" placeholder="Ex: Capteur_1" required>
                 </div>
                 <div class="form-group">
-                    <label>Type de liaison</label>
-                    <select id="newDeviceType">
-                        <option value="4G / Raspberry">4G / Raspberry Pi</option>
-                        <option value="WiFi">WiFi</option>
-                        <option value="ESP-NOW">ESP-NOW</option>
-                    </select>
+                    <label>Nom de la machine</label>
+                    <input type="text" id="editDeviceMachine" placeholder="Ex: Pompe centrifuge 2">
+                </div>
+                <div class="form-group">
+                    <label>Lieu / Emplacement</label>
+                    <input type="text" id="editDeviceLocation" placeholder="Ex: Atelier Usinage - Ligne 3">
+                </div>
+                <div class="form-group">
+                    <label>Seuil d'anomalie IA (déclenchement alerte)</label>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <input type="number" id="editDeviceThreshold" step="0.1" min="0" placeholder="Ex: 8.0" required style="flex:1;">
+                        <span style="color:#94a3b8; font-size:13px; font-weight:500;">pts</span>
+                    </div>
+                    <small style="color:#64748b; font-size:11px; margin-top:4px; display:block;">
+                        Le nouveau seuil sera envoyé par 4G et mémorisé en flash NVS dans l'esclave.
+                    </small>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('modalAddDevice')">Annuler</button>
-                    <button type="submit" class="btn btn-primary">Enregistrer</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('modalEditDevice')">Annuler</button>
+                    <button type="submit" class="btn btn-primary" id="btnSaveDevice">Enregistrer les modifications</button>
                 </div>
             </form>
         </div>

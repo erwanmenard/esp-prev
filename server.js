@@ -128,6 +128,9 @@ app.get('/api/devices', async (req, res) => {
                 return { 
                     id: key, 
                     ...safeItem, 
+                    machine_name: item.machine_name || "",
+                    anomaly_threshold: item.anomaly_threshold !== undefined ? item.anomaly_threshold : 8.0,
+                    mac: item.mac || (key.includes('_') ? key.replace(/_/g, ':') : ""),
                     is_online,
                     last_seen_ts: lastSeenTime,
                     last_seen: formatParisFull(lastSeenTime)
@@ -158,12 +161,20 @@ app.get('/api/devices', async (req, res) => {
                         existing.last_seen = formatParisFull(ts);
                         if (item.connection_type) existing.connection_type = item.connection_type;
                     }
+                    if (item.mac && !existing.mac) existing.mac = item.mac;
+                    if (item.machine_name && !existing.machine_name) existing.machine_name = item.machine_name;
+                    if (item.anomaly_threshold !== undefined && existing.anomaly_threshold === undefined) {
+                        existing.anomaly_threshold = item.anomaly_threshold;
+                    }
                 } else {
                     list.push({
                         id: dName,
                         name: dName,
-                        location: "Passerelle 4G LTE",
+                        machine_name: item.machine_name || "",
+                        location: item.location || "Passerelle 4G LTE",
                         connection_type: item.connection_type || "4G",
+                        anomaly_threshold: item.anomaly_threshold !== undefined ? item.anomaly_threshold : 8.0,
+                        mac: item.mac || "",
                         is_active: 1,
                         is_online: is_online,
                         last_seen_ts: ts,
@@ -216,17 +227,59 @@ app.post('/api/devices', async (req, res) => {
 });
 
 app.put('/api/devices/:id', async (req, res) => {
-    const id = req.params.id;
-    const updates = req.body;
+    const rawId = req.params.id;
+    const safeId = String(rawId).replace(/[:.]/g, '_');
+    const { name, machine_name, location, anomaly_threshold, mac } = req.body;
 
-    if (isFirebaseConnected) {
-        await db.ref('devices').child(id).update(updates);
-        return res.json({ success: true });
+    const updates = {
+        name: name || rawId,
+        machine_name: machine_name || "",
+        location: location || "Emplacement non précisé",
+        updated_at: new Date().toISOString()
+    };
+    if (anomaly_threshold !== undefined && !isNaN(parseFloat(anomaly_threshold))) {
+        updates.anomaly_threshold = parseFloat(anomaly_threshold);
+    }
+    if (mac) {
+        updates.mac = mac;
     }
 
-    const dev = localDevices.find(d => String(d.id) === String(id));
+    if (isFirebaseConnected) {
+        // 1. Mettre à jour dans /devices
+        await db.ref('devices').child(safeId).update(updates);
+
+        // 2. Mettre à jour dans /latest pour affichage temps réel immédiat
+        const latestKey = updates.name || rawId;
+        const latestSnap = await db.ref('latest').child(latestKey).once('value');
+        if (latestSnap.exists()) {
+            const latestUpdate = {
+                device_name: updates.name,
+                location: updates.location
+            };
+            if (updates.machine_name) latestUpdate.machine_name = updates.machine_name;
+            if (updates.anomaly_threshold !== undefined) latestUpdate.anomaly_threshold = updates.anomaly_threshold;
+            await db.ref('latest').child(latestKey).update(latestUpdate);
+        }
+
+        // 3. Si un seuil IA est défini, créer un ordre dans /commands pour que le Maître 4G l'applique à l'esclave
+        if (updates.anomaly_threshold !== undefined) {
+            const targetMac = mac || rawId;
+            const cmdKey = String(targetMac).replace(/[:.]/g, '_');
+            await db.ref('commands').child(cmdKey).set({
+                mac: targetMac,
+                device_name: updates.name,
+                anomaly_threshold: updates.anomaly_threshold,
+                timestamp: Date.now()
+            });
+            console.log(`📡 [ORDRE 4G GÉNÉRÉ] Nouveau seuil IA ${updates.anomaly_threshold} pour MAC ${targetMac}`);
+        }
+
+        return res.json({ success: true, updates });
+    }
+
+    const dev = localDevices.find(d => String(d.id) === String(rawId) || String(d.id) === safeId);
     if (dev) Object.assign(dev, updates);
-    res.json({ success: true });
+    res.json({ success: true, updates });
 });
 
 app.delete('/api/devices/:id', async (req, res) => {

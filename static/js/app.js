@@ -316,10 +316,14 @@ async function loadHistory() {
 // -------------------------------------------------------------
 // VUE APPAREILS
 // -------------------------------------------------------------
+let cachedDevices = [];
+let currentEditingDevice = null;
+
 async function loadDevices() {
     try {
         const res = await fetch('/api/devices');
         const devices = await res.json();
+        cachedDevices = devices;
 
         // Mettre à jour le select de seuils
         const thSelect = document.getElementById('thDeviceSelect');
@@ -329,32 +333,47 @@ async function loadDevices() {
 
         const list = document.getElementById('devicesList');
         if (devices.length === 0) {
-            list.innerHTML = '<div class="empty-state">Aucun appareil détecté. Démarrez un script Raspberry pour l\'enregistrer.</div>';
+            list.innerHTML = '<div class="empty-state">Aucun appareil détecté. Démarrez un capteur ou la passerelle 4G pour l\'enregistrer.</div>';
             return;
         }
 
         list.innerHTML = devices.map(d => {
             const isOnline = d.is_online;
+            const thresholdDisplay = d.anomaly_threshold !== undefined ? `${d.anomaly_threshold} pts` : '8.0 pts';
+            const machineDisplay = d.machine_name ? `<div class="device-machine" style="color:#94a3b8; font-size:12px; margin-top:2px;">⚙️ Machine : <strong style="color:#e2e8f0;">${d.machine_name}</strong></div>` : '';
+            const macDisplay = d.mac ? `<span style="font-family:monospace; font-size:11px; color:#64748b; margin-left:8px;">[${d.mac}]</span>` : '';
+
             return `
                 <div class="device-card">
                     <div>
                         <div class="device-header">
-                            <div class="device-title-row">
+                            <div class="device-title-row" style="flex-wrap: wrap; gap: 6px; align-items: center;">
                                 <span class="status-dot ${isOnline ? 'online' : ''}"></span>
                                 <span class="device-name">${d.name}</span>
                                 ${formatConnectionTag(d.connection_type)}
+                                ${macDisplay}
                             </div>
                         </div>
-                        <div class="device-location">
+                        ${machineDisplay}
+                        <div class="device-location" style="margin-top: 4px;">
                             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                             ${d.location || 'Emplacement non précisé'}
+                            <span style="display:inline-block; margin-left:12px; background:rgba(16,185,129,0.12); color:#10b981; border:1px solid rgba(16,185,129,0.25); border-radius:4px; padding:1px 6px; font-size:11px; font-weight:600;">
+                                Seuil IA : ${thresholdDisplay}
+                            </span>
                         </div>
-                        <div class="device-status-text">
+                        <div class="device-status-text" style="margin-top: 6px;">
                             ${isOnline ? '<span style="color:#10b981; font-weight:600;">● En ligne</span> · actif maintenant' : '<span style="color:#64748b;">○ Hors ligne</span>'} · dernière mesure : ${d.last_seen || (d.last_seen_ts ? formatFullDateTime(d.last_seen_ts) : 'jamais')}
                         </div>
                     </div>
-                    <div class="device-actions">
-                        <button class="btn-icon" onclick="deleteDevice('${d.id}')" title="Supprimer cet appareil">
+                    <div class="device-actions" style="display:flex; gap:8px;">
+                        <button class="btn-icon" onclick="openEditDeviceModal('${d.id}')" title="Modifier cet appareil" style="color:#38bdf8;">
+                            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                            </svg>
+                        </button>
+                        <button class="btn-icon" onclick="deleteDevice('${d.id}')" title="Supprimer cet appareil" style="color:#ef4444;">
                             <svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                         </button>
                     </div>
@@ -363,6 +382,64 @@ async function loadDevices() {
         }).join('');
     } catch (err) {
         console.error("Erreur chargement appareils :", err);
+    }
+}
+
+function openEditDeviceModal(id) {
+    const d = cachedDevices.find(item => String(item.id) === String(id));
+    if (!d) return;
+    currentEditingDevice = d;
+
+    document.getElementById('editDeviceId').value = d.id;
+    document.getElementById('editDeviceMac').value = d.mac || (d.id.includes('_') ? d.id.replace(/_/g, ':') : d.id);
+    document.getElementById('editDeviceName').value = d.name || "";
+    document.getElementById('editDeviceMachine').value = d.machine_name || "";
+    document.getElementById('editDeviceLocation').value = d.location || "";
+    document.getElementById('editDeviceThreshold').value = (d.anomaly_threshold !== undefined && d.anomaly_threshold !== null) ? d.anomaly_threshold : 8.0;
+
+    openModal('modalEditDevice');
+}
+
+async function handleUpdateDevice(e) {
+    e.preventDefault();
+    const id = document.getElementById('editDeviceId').value;
+    const name = document.getElementById('editDeviceName').value.trim();
+    const machine_name = document.getElementById('editDeviceMachine').value.trim();
+    const location = document.getElementById('editDeviceLocation').value.trim();
+    const anomaly_threshold = parseFloat(document.getElementById('editDeviceThreshold').value);
+    const mac = document.getElementById('editDeviceMac').value.trim();
+
+    const btn = document.getElementById('btnSaveDevice');
+    const oldText = btn.textContent;
+    btn.textContent = "Transmission en cours...";
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`/api/devices/${encodeURIComponent(id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                machine_name,
+                location,
+                anomaly_threshold,
+                mac
+            })
+        });
+
+        if (res.ok) {
+            closeModal('modalEditDevice');
+            await loadDevices();
+            await loadDashboard();
+        } else {
+            const err = await res.json();
+            alert(err.error || "Erreur lors de la mise à jour");
+        }
+    } catch (err) {
+        alert("Erreur de connexion : " + err.message);
+    } finally {
+        btn.textContent = oldText;
+        btn.disabled = false;
     }
 }
 
@@ -541,12 +618,18 @@ async function resolveAlert(id) {
 // -------------------------------------------------------------
 // MODALES & UTILITAIRES
 // -------------------------------------------------------------
+function openModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('hidden');
+}
+
 function openAddDeviceModal() {
-    document.getElementById('modalAddDevice').classList.remove('hidden');
+    openModal('modalAddDevice');
 }
 
 function closeModal(id) {
-    document.getElementById(id).classList.add('hidden');
+    const el = document.getElementById(id);
+    if (el) el.classList.add('hidden');
 }
 
 function showApiKey(key) {
