@@ -153,7 +153,12 @@ app.get('/api/devices', async (req, res) => {
             for (const dName of Object.keys(seenDevices)) {
                 const { item, ts } = seenDevices[dName];
                 const is_online = (now - ts) < 180000;
-                const existing = list.find(d => d.name === dName || d.id === dName);
+                // Recherche intelligente : par ID, par nom OU par adresse MAC
+                const existing = list.find(d => 
+                    d.id === dName || 
+                    d.name === dName || 
+                    (item.mac && d.mac && d.mac.toUpperCase() === item.mac.toUpperCase())
+                );
                 if (existing) {
                     if (ts > (existing.last_seen_ts || 0)) {
                         existing.is_online = is_online;
@@ -163,8 +168,23 @@ app.get('/api/devices', async (req, res) => {
                     }
                     if (item.mac && !existing.mac) existing.mac = item.mac;
                     if (item.machine_name && !existing.machine_name) existing.machine_name = item.machine_name;
-                    if (item.anomaly_threshold !== undefined && existing.anomaly_threshold === undefined) {
-                        existing.anomaly_threshold = item.anomaly_threshold;
+
+                    // Synchronisation du seuil IA actif mesuré par le capteur (ex: suite à auto-calibration)
+                    if (item.anomaly_threshold !== undefined) {
+                        const newTh = parseFloat(item.anomaly_threshold);
+                        const lastManualUpdate = existing.updated_at ? parseTsSafe(existing.updated_at) : 0;
+                        const isRecentManualEdit = (now - lastManualUpdate) < 15000;
+
+                        if (!isNaN(newTh) && (!isRecentManualEdit || ts > lastManualUpdate)) {
+                            if (existing.anomaly_threshold !== newTh) {
+                                existing.anomaly_threshold = newTh;
+                                // Mettre à jour Firebase /devices pour que le nouveau seuil soit persisté
+                                db.ref('devices').child(existing.id).update({
+                                    anomaly_threshold: newTh,
+                                    last_seen_ts: ts
+                                }).catch(() => {});
+                            }
+                        }
                     }
                 } else {
                     list.push({
@@ -521,12 +541,26 @@ app.get('/api/telemetry/latest', async (req, res) => {
             const latest = latestMap[devName];
             if (!latest) continue;
 
+            const devObj = devices.find(d => 
+                d.id === devName || 
+                d.name === devName || 
+                (latest.mac && d.mac && d.mac.toUpperCase() === latest.mac.toUpperCase())
+            );
+            const displayName = devObj ? (devObj.name || devName) : devName;
+            const activeThreshold = (latest.anomaly_threshold !== undefined) 
+                ? latest.anomaly_threshold 
+                : (devObj && devObj.anomaly_threshold !== undefined ? devObj.anomaly_threshold : 8.0);
+
             cards.push({
-                device_name: devName,
+                device_name: displayName,
+                raw_device_name: devName,
+                mac: latest.mac || (devObj ? devObj.mac : ""),
+                machine_name: devObj ? devObj.machine_name : "",
+                location: devObj ? devObj.location : "",
                 timestamp: latest.timestamp_ts || latest.timestamp || "",
                 time_display: formatParisCard(latest.timestamp_ts || latest.timestamp),
                 anomaly_score: latest.anomaly_score !== undefined ? latest.anomaly_score : 0,
-                anomaly_threshold: latest.anomaly_threshold !== undefined ? latest.anomaly_threshold : 8.0,
+                anomaly_threshold: activeThreshold,
                 status: latest.status || "NORMAL",
                 connection_type: latest.connection_type || "4G",
                 alert_origin: latest.alert_origin || "",

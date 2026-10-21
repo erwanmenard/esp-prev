@@ -425,7 +425,7 @@ async function loadDevices() {
                         </div>
                     </div>
                     <div class="device-actions" style="display:flex; align-items:center; gap:8px;">
-                        <button class="btn btn-secondary btn-sm" onclick="triggerCalibration('${d.id}', '${d.mac || ''}')" title="Lancer une calibration automatique de 10 secondes" style="padding:4px 9px; font-size:11px; display:inline-flex; align-items:center; gap:4px; border-radius:6px;">
+                        <button class="btn btn-secondary btn-sm" onclick="triggerCalibration('${d.id}', '${d.mac || ''}', this)" title="Lancer une calibration automatique de 10 secondes" style="padding:4px 9px; font-size:11px; display:inline-flex; align-items:center; gap:4px; border-radius:6px;">
                             🎯 Calibrer (10s)
                         </button>
                         <button class="btn-icon" onclick="openEditDeviceModal('${d.id}')" title="Modifier cet appareil" style="color:#38bdf8;">
@@ -515,11 +515,16 @@ async function handleUpdateDevice(e) {
     }
 }
 
-async function triggerCalibration(id, mac) {
+async function triggerCalibration(id, mac, btnElement) {
     if (!confirm("Lancer l'auto-calibration de 10 secondes sur cet appareil ?\n\nAssurez-vous que la machine tourne à son régime nominal sain pendant l'opération.")) {
         return;
     }
     try {
+        if (btnElement) {
+            btnElement.disabled = true;
+            btnElement.innerHTML = `⏳ Envoi de l'ordre...`;
+        }
+
         const res = await fetch(`/api/devices/${encodeURIComponent(id)}/calibrate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -527,11 +532,40 @@ async function triggerCalibration(id, mac) {
         });
         const data = await res.json();
         if (res.ok) {
-            alert("🎯 Ordre de calibration envoyé avec succès !\nL'esclave va allumer sa LED blanche pendant 10s, mesurer les baselines saines et enregistrer le nouveau seuil en flash NVS.");
+            if (btnElement) {
+                let count = 15;
+                btnElement.innerHTML = `⏳ Calib en cours (${count}s)...`;
+                const timer = setInterval(async () => {
+                    count--;
+                    if (count > 0) {
+                        btnElement.innerHTML = `⏳ Calib en cours (${count}s)...`;
+                    } else {
+                        clearInterval(timer);
+                        btnElement.innerHTML = `✅ Mise à jour...`;
+                        await loadDevices();
+                        await loadDashboard();
+                        setTimeout(() => {
+                            btnElement.disabled = false;
+                            btnElement.innerHTML = `🎯 Calibrer (10s)`;
+                        }, 2500);
+                    }
+                }, 1000);
+            } else {
+                alert("🎯 Ordre de calibration envoyé avec succès !\nL'esclave va allumer sa LED blanche pendant 10s, mesurer les baselines saines et enregistrer le nouveau seuil en flash NVS.");
+                setTimeout(() => { loadDevices(); loadDashboard(); }, 15000);
+            }
         } else {
+            if (btnElement) {
+                btnElement.disabled = false;
+                btnElement.innerHTML = `🎯 Calibrer (10s)`;
+            }
             alert(data.error || "Erreur lors du déclenchement de la calibration");
         }
     } catch (err) {
+        if (btnElement) {
+            btnElement.disabled = false;
+            btnElement.innerHTML = `🎯 Calibrer (10s)`;
+        }
         alert("Erreur de connexion : " + err.message);
     }
 }
