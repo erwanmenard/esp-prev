@@ -487,12 +487,23 @@ app.get('/api/telemetry/latest', async (req, res) => {
             openAlerts = localAlerts.filter(a => a.status === 'open');
         }
 
-        if (devices.length === 0 && Object.keys(latestMap).length > 0) {
-            for (const dName of Object.keys(latestMap)) {
+        // Fusionner tous les appareils de latestMap dans devices s'ils n'y sont pas
+        for (const dName of Object.keys(latestMap)) {
+            const existing = devices.find(d => d.name === dName || d.id === dName);
+            const rRec = latestMap[dName];
+            const rTs = parseTsSafe(rRec.timestamp, rRec.timestamp_ts);
+            if (existing) {
+                if (rTs > parseTsSafe(existing.last_seen, existing.last_seen_ts)) {
+                    existing.last_seen_ts = rTs;
+                    existing.last_seen = formatParisFull(rTs);
+                }
+            } else {
                 devices.push({
+                    id: dName,
                     name: dName,
-                    last_seen: latestMap[dName].timestamp,
-                    last_seen_ts: latestMap[dName].timestamp_ts
+                    last_seen_ts: rTs,
+                    last_seen: formatParisFull(rTs),
+                    connection_type: rRec.connection_type || "4G"
                 });
             }
         }
@@ -500,7 +511,7 @@ app.get('/api/telemetry/latest', async (req, res) => {
         let onlineCount = 0;
         devices.forEach(d => {
             const lastSeenTs = parseTsSafe(d.last_seen, d.last_seen_ts);
-            if ((now - lastSeenTs) < 60000) onlineCount++;
+            if ((now - lastSeenTs) < 180000) onlineCount++;
         });
 
         const cards = [];
@@ -518,12 +529,14 @@ app.get('/api/telemetry/latest', async (req, res) => {
                 anomaly_threshold: latest.anomaly_threshold !== undefined ? latest.anomaly_threshold : 8.0,
                 status: latest.status || "NORMAL",
                 connection_type: latest.connection_type || "4G",
+                alert_origin: latest.alert_origin || "",
+                diagnostic: latest.diagnostic || "",
                 vibration_pic: latest.vibration_peak || 0,
-                vibration_moyenne: latest.vibration_mean || 0,
+                vibration_moyenne: latest.vibration_rms || latest.vibration_mean || 0,
                 sound_peak: latest.sound_peak || 0,
-                sound_moyenne: latest.sound_mean || 0,
+                sound_moyenne: latest.sound_rms || latest.sound_mean || 0,
                 kurtosis: latest.kurtosis || 0,
-                rms: latest.rms || 0
+                rms: latest.vibration_rms || latest.rms || 0
             });
         }
 
@@ -564,16 +577,51 @@ app.get('/api/telemetry/history', async (req, res) => {
         const slice = rows.slice(-limit);
         const labels = slice.map(r => formatParisTime(r.timestamp_ts || r.timestamp));
         const values = slice.map(r => r[metric] !== undefined ? r[metric] : 0);
+        const points = slice.map(r => ({
+            timestamp: r.timestamp_ts || r.timestamp,
+            time_display: formatParisTime(r.timestamp_ts || r.timestamp),
+            score: r.anomaly_score !== undefined ? r.anomaly_score : 0,
+            threshold: r.anomaly_threshold !== undefined ? r.anomaly_threshold : 8.0,
+            status: r.status || "NORMAL",
+            alert_origin: r.alert_origin || "",
+            diagnostic: r.diagnostic || "",
+            vibration_rms: r.vibration_rms !== undefined ? r.vibration_rms : (r.vibration_mean || 0),
+            vibration_peak: r.vibration_peak !== undefined ? r.vibration_peak : 0,
+            sound_rms: r.sound_rms !== undefined ? r.sound_rms : (r.sound_mean || 0),
+            device_name: r.device_name || "Capteur"
+        }));
 
         res.json({
             metric,
             labels,
             values,
+            points,
             count: values.length
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
+});
+
+// -------------------------------------------------------------
+// API : DÉCLENCHEMENT DE CALIBRATION À DISTANCE
+// -------------------------------------------------------------
+app.post('/api/devices/:id/calibrate', async (req, res) => {
+    const rawId = req.params.id;
+    const { mac } = req.body;
+    const targetMac = mac || rawId;
+    const cmdKey = String(targetMac).replace(/[:.]/g, '_');
+
+    if (isFirebaseConnected) {
+        await db.ref('commands').child(cmdKey).set({
+            mac: targetMac,
+            cmd: "START_CALIB",
+            timestamp: Date.now()
+        });
+        console.log(`🎯 [CALIBRATION DISTANTE] Ordre START_CALIB transmis pour MAC ${targetMac}`);
+        return res.json({ success: true, message: "Ordre de calibration transmis avec succès" });
+    }
+    res.json({ success: true, message: "Mode local (simulation calibration)" });
 });
 
 // -------------------------------------------------------------

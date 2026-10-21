@@ -348,7 +348,60 @@
 
 
 
+    <!-- MODAL : DÉTAIL D'UNE ALERTE (CLIC SUR LE GRAPHIQUE) -->
+    <div id="modalAlertDetails" class="modal-overlay hidden">
+        <div class="modal-dialog" style="max-width: 480px;">
+            <div class="modal-header" style="border-bottom: 1px solid rgba(239,68,68,0.2);">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:20px;">🚨</span>
+                    <h3 style="color:#ef4444; margin:0;">Détail de l'Alerte IA</h3>
+                </div>
+                <button class="close-btn" onclick="closeModal('modalAlertDetails')">&times;</button>
+            </div>
+            <div class="modal-body" style="padding: 16px 0;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; background:rgba(255,255,255,0.03); padding:10px 14px; border-radius:8px;">
+                    <div>
+                        <div id="alertDetailDevice" style="font-weight:700; font-size:15px; color:#f8fafc;">Capteur_1</div>
+                        <div id="alertDetailTime" style="font-size:12px; color:#94a3b8;">--</div>
+                    </div>
+                    <div id="alertDetailOriginBadge" style="background:rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.3); padding:4px 10px; border-radius:6px; font-weight:700; font-size:12px;">
+                        ALERTE
+                    </div>
+                </div>
+
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:14px;">
+                    <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.2); border-radius:8px; padding:10px; text-align:center;">
+                        <div style="font-size:11px; color:#94a3b8; text-transform:uppercase;">Score Anomalie IA</div>
+                        <div id="alertDetailScore" style="font-size:22px; font-weight:800; color:#ef4444; margin-top:2px;">-- pts</div>
+                    </div>
+                    <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:10px; text-align:center;">
+                        <div style="font-size:11px; color:#94a3b8; text-transform:uppercase;">Seuil Détecté</div>
+                        <div id="alertDetailThreshold" style="font-size:22px; font-weight:800; color:#e2e8f0; margin-top:2px;">-- pts</div>
+                    </div>
+                </div>
+
+                <div style="margin-bottom:14px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px;">
+                    <div style="font-size:11px; color:#94a3b8; text-transform:uppercase; margin-bottom:4px;">Diagnostic IA Présumé</div>
+                    <div id="alertDetailDiagnostic" style="font-weight:600; color:#38bdf8; font-size:14px;">--</div>
+                </div>
+
+                <div style="background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px;">
+                    <div style="font-size:11px; color:#94a3b8; text-transform:uppercase; margin-bottom:8px;">Données Physiques au moment du choc</div>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; font-size:12px;">
+                        <div><span style="color:#64748b;">Vibration RMS :</span> <strong id="alertDetailVibRms" style="color:#f8fafc;">--</strong></div>
+                        <div><span style="color:#64748b;">Vibration Pic :</span> <strong id="alertDetailVibPeak" style="color:#f8fafc;">--</strong></div>
+                        <div><span style="color:#64748b;">Son RMS :</span> <strong id="alertDetailSoundRms" style="color:#f8fafc;">--</strong></div>
+                        <div><span style="color:#64748b;">Liaison :</span> <strong style="color:#10b981;">4G LTE</strong></div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer" style="margin-top:10px;">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('modalAlertDetails')">Fermer</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Script JavaScript applicatif -->
-    <script src="/static/js/app.js?v=3"></script>
+    <script src="/static/js/app.js?v=4"></script>
 </body>
 </html>

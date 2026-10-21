@@ -81,6 +81,8 @@ function switchView(viewName) {
     }
 }
 
+let currentHistoryPoints = [];
+
 // -------------------------------------------------------------
 // GRAPHIQUE HISTORIQUE (CHART.JS)
 // -------------------------------------------------------------
@@ -103,7 +105,7 @@ function initChart() {
                 backgroundColor: gradient,
                 borderWidth: 2,
                 pointRadius: 0,
-                pointHoverRadius: 5,
+                pointHoverRadius: 6,
                 pointHoverBackgroundColor: '#10b981',
                 pointHoverBorderColor: '#ffffff',
                 pointHoverBorderWidth: 2,
@@ -118,6 +120,17 @@ function initChart() {
                 intersect: false,
                 mode: 'index'
             },
+            onClick: (e) => {
+                if (!historyChart) return;
+                const points = historyChart.getElementsAtEventForMode(e, 'nearest', { intersect: false }, true);
+                if (points.length > 0) {
+                    const idx = points[0].index;
+                    const ptData = currentHistoryPoints[idx];
+                    if (ptData) {
+                        openAlertDetailsModal(ptData);
+                    }
+                }
+            },
             plugins: {
                 legend: { display: false },
                 tooltip: {
@@ -130,7 +143,17 @@ function initChart() {
                     displayColors: false,
                     callbacks: {
                         label: function(context) {
-                            const conf = METRIC_CONFIG[activeHistoryMetric] || { unit: '' };
+                            const conf = METRIC_CONFIG[activeHistoryMetric] || { unit: 'pts' };
+                            const idx = context.dataIndex;
+                            const pt = currentHistoryPoints[idx];
+                            if (pt && (pt.status === 'ALERTE' || pt.score >= pt.threshold)) {
+                                return [
+                                    `🚨 ALERTE : ${context.parsed.y} ${conf.unit}`,
+                                    `Origine : ${pt.alert_origin || 'Vibration/Son'}`,
+                                    `Diagnostic : ${pt.diagnostic || 'Anomalie'}`,
+                                    `👉 Cliquez pour voir les détails RMS`
+                                ];
+                            }
                             return `${context.parsed.y} ${conf.unit}`;
                         }
                     }
@@ -150,11 +173,46 @@ function initChart() {
     });
 }
 
-function updateChart(labels, data, metricName) {
+function updateChart(labels, data, metricName, pointsMetadata) {
     if (!historyChart) return;
+    currentHistoryPoints = pointsMetadata || [];
+    const conf = METRIC_CONFIG[metricName] || { label: 'Score IA', unit: 'pts' };
+
+    // Détection des alertes pour les afficher en rouge vif cliquable
+    const pointRadii = currentHistoryPoints.map(p => (p && (p.status === 'ALERTE' || p.score >= p.threshold)) ? 6 : 0);
+    const pointColors = currentHistoryPoints.map(p => (p && (p.status === 'ALERTE' || p.score >= p.threshold)) ? '#ef4444' : '#10b981');
+    const pointHoverRadii = currentHistoryPoints.map(p => (p && (p.status === 'ALERTE' || p.score >= p.threshold)) ? 9 : 6);
+
     historyChart.data.labels = labels;
+    historyChart.data.datasets[0].label = `${conf.label} (${conf.unit})`;
     historyChart.data.datasets[0].data = data;
+    historyChart.data.datasets[0].pointRadius = pointRadii;
+    historyChart.data.datasets[0].pointBackgroundColor = pointColors;
+    historyChart.data.datasets[0].pointHoverRadius = pointHoverRadii;
     historyChart.update('none'); // mise a jour sans saccade
+}
+
+function openAlertDetailsModal(p) {
+    if (!p) return;
+    document.getElementById('alertDetailDevice').textContent = p.device_name || 'Capteur';
+    document.getElementById('alertDetailTime').textContent = formatFullDateTime(p.timestamp);
+
+    const isAlert = (p.status === 'ALERTE' || p.score >= p.threshold);
+    const badge = document.getElementById('alertDetailOriginBadge');
+    badge.textContent = p.alert_origin ? p.alert_origin.toUpperCase() : (isAlert ? 'ALERTE IA' : 'NORMAL');
+    badge.style.background = isAlert ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)';
+    badge.style.color = isAlert ? '#ef4444' : '#10b981';
+    badge.style.borderColor = isAlert ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)';
+
+    document.getElementById('alertDetailScore').textContent = `${formatNumber(p.score)} pts`;
+    document.getElementById('alertDetailThreshold').textContent = `${p.threshold} pts`;
+    document.getElementById('alertDetailDiagnostic').textContent = p.diagnostic || (isAlert ? 'Anomalie détectée' : 'Fonctionnement nominal');
+
+    document.getElementById('alertDetailVibRms').textContent = (p.vibration_rms !== undefined && p.vibration_rms > 0) ? `${p.vibration_rms.toFixed(4)} m/s²` : '--';
+    document.getElementById('alertDetailVibPeak').textContent = (p.vibration_peak !== undefined && p.vibration_peak > 0) ? `${p.vibration_peak.toFixed(4)} m/s²` : '--';
+    document.getElementById('alertDetailSoundRms').textContent = (p.sound_rms !== undefined && p.sound_rms > 0) ? `${p.sound_rms.toFixed(1)} raw` : '--';
+
+    openModal('modalAlertDetails');
 }
 
 // Fonctions utilitaires de date/heure (fuseau horaire local automatique)
@@ -307,7 +365,7 @@ async function loadHistory() {
             if (typeof ts === 'string' && ts.length <= 8 && ts.includes(':')) return ts;
             return formatTime(ts);
         });
-        updateChart(formattedLabels, data.values, activeHistoryMetric);
+        updateChart(formattedLabels, data.values, activeHistoryMetric, data.points);
     } catch (err) {
         console.error("Erreur chargement historique :", err);
     }
@@ -366,7 +424,10 @@ async function loadDevices() {
                             ${isOnline ? '<span style="color:#10b981; font-weight:600;">● En ligne</span> · actif maintenant' : '<span style="color:#64748b;">○ Hors ligne</span>'} · dernière mesure : ${d.last_seen || (d.last_seen_ts ? formatFullDateTime(d.last_seen_ts) : 'jamais')}
                         </div>
                     </div>
-                    <div class="device-actions" style="display:flex; gap:8px;">
+                    <div class="device-actions" style="display:flex; align-items:center; gap:8px;">
+                        <button class="btn btn-secondary btn-sm" onclick="triggerCalibration('${d.id}', '${d.mac || ''}')" title="Lancer une calibration automatique de 10 secondes" style="padding:4px 9px; font-size:11px; display:inline-flex; align-items:center; gap:4px; border-radius:6px;">
+                            🎯 Calibrer (10s)
+                        </button>
                         <button class="btn-icon" onclick="openEditDeviceModal('${d.id}')" title="Modifier cet appareil" style="color:#38bdf8;">
                             <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none">
                                 <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -451,6 +512,27 @@ async function handleUpdateDevice(e) {
     } finally {
         btn.textContent = oldText;
         btn.disabled = false;
+    }
+}
+
+async function triggerCalibration(id, mac) {
+    if (!confirm("Lancer l'auto-calibration de 10 secondes sur cet appareil ?\n\nAssurez-vous que la machine tourne à son régime nominal sain pendant l'opération.")) {
+        return;
+    }
+    try {
+        const res = await fetch(`/api/devices/${encodeURIComponent(id)}/calibrate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mac })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert("🎯 Ordre de calibration envoyé avec succès !\nL'esclave va allumer sa LED blanche pendant 10s, mesurer les baselines saines et enregistrer le nouveau seuil en flash NVS.");
+        } else {
+            alert(data.error || "Erreur lors du déclenchement de la calibration");
+        }
+    } catch (err) {
+        alert("Erreur de connexion : " + err.message);
     }
 }
 
