@@ -281,18 +281,21 @@ app.put('/api/devices/:id', async (req, res) => {
             await db.ref('latest').child(latestKey).update(latestUpdate);
         }
 
-        // 3. Si un seuil IA est défini, créer un ordre dans /commands pour que le Maître 4G l'applique à l'esclave
+        // 3. Créer un ordre dans /commands pour que la passerelle 4G synchronise le nom, la machine, le lieu et le seuil IA
+        const targetMac = mac || rawId;
+        const cmdKey = String(targetMac).replace(/[:.]/g, '_');
+        const cmdPayload = {
+            mac: targetMac,
+            device_name: updates.name,
+            machine_name: updates.machine_name || "",
+            location: updates.location || "Emplacement non précisé",
+            timestamp: Date.now()
+        };
         if (updates.anomaly_threshold !== undefined) {
-            const targetMac = mac || rawId;
-            const cmdKey = String(targetMac).replace(/[:.]/g, '_');
-            await db.ref('commands').child(cmdKey).set({
-                mac: targetMac,
-                device_name: updates.name,
-                anomaly_threshold: updates.anomaly_threshold,
-                timestamp: Date.now()
-            });
-            console.log(`📡 [ORDRE 4G GÉNÉRÉ] Nouveau seuil IA ${updates.anomaly_threshold} pour MAC ${targetMac}`);
+            cmdPayload.anomaly_threshold = updates.anomaly_threshold;
         }
+        await db.ref('commands').child(cmdKey).set(cmdPayload);
+        console.log(`📡 [ORDRE 4G GÉNÉRÉ] Synchronisation appareil ${updates.name} (MAC: ${targetMac}) : Machine='${updates.machine_name}', Lieu='${updates.location}', Seuil=${updates.anomaly_threshold}`);
 
         return res.json({ success: true, updates });
     }
