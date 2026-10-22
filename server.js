@@ -265,8 +265,17 @@ app.put('/api/devices/:id', async (req, res) => {
     }
 
     if (isFirebaseConnected) {
-        // 1. Mettre à jour dans /devices
-        await db.ref('devices').child(safeId).update(updates);
+        // 1. Mettre à jour dans /devices (avec migration de la clé si le nom a changé)
+        const newKey = String(updates.name || safeId).replace(/[:.]/g, '_').trim();
+        if (newKey && newKey !== safeId) {
+            const oldSnap = await db.ref('devices').child(safeId).once('value');
+            const oldVal = oldSnap.val() || {};
+            await db.ref('devices').child(newKey).set({ ...oldVal, ...updates });
+            await db.ref('devices').child(safeId).remove();
+            console.log(`🔄 [FIREBASE] Appareil migré de /devices/${safeId} vers /devices/${newKey}`);
+        } else {
+            await db.ref('devices').child(safeId).update(updates);
+        }
 
         // 2. Mettre à jour dans /latest pour affichage temps réel immédiat
         const latestKey = updates.name || rawId;
@@ -371,7 +380,8 @@ app.post('/api/telemetry', async (req, res) => {
             if (data.connection_type) updates.connection_type = data.connection_type;
             await db.ref('devices/' + foundKey).update(updates);
         } else {
-            await db.ref('devices').push({
+            const devKey = String(deviceName).replace(/[:.]/g, '_').trim();
+            await db.ref('devices').child(devKey).set({
                 name: deviceName,
                 location: "Emplacement non précisé",
                 connection_type: connType,
