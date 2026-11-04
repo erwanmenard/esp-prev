@@ -34,6 +34,10 @@
     --shadow-card: 0 4px 20px -2px rgba(0, 0, 0, 0.4);
 }
 
+.hidden {
+    display: none !important;
+}
+
 body.light-theme {
     --bg-main: #f8fafc;
     --bg-sidebar: #ffffff;

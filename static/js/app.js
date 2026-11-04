@@ -193,35 +193,87 @@ function updateChart(labels, data, metricName, pointsMetadata) {
 }
 
 let currentAlertModalData = null;
+let isDiagnosticEditing = false;
 
-function toggleEditDiagnostic(isEditing) {
+function toggleDiagnosticMode(editing) {
+    isDiagnosticEditing = !!editing;
     const viewDiv = document.getElementById('alertDetailDiagView');
     const editDiv = document.getElementById('alertDetailDiagEdit');
-    const btnEdit = document.getElementById('btnEditDiagnostic');
+    const btn = document.getElementById('btnToggleDiagnostic');
     const input = document.getElementById('alertDetailDiagInput');
     if (!viewDiv || !editDiv) return;
 
-    if (isEditing) {
+    if (isDiagnosticEditing) {
+        // Passage en mode modification : on masque le texte et on affiche la zone de saisie
+        viewDiv.style.display = 'none';
         viewDiv.classList.add('hidden');
+        editDiv.style.display = 'block';
         editDiv.classList.remove('hidden');
-        if (btnEdit) btnEdit.classList.add('hidden');
+
         const curText = document.getElementById('alertDetailDiagnostic').textContent.trim();
         input.value = (curText === '--' || curText === 'Fonctionnement nominal') ? '' : curText;
+        if (btn) {
+            btn.innerHTML = '💾 Enregistrer';
+            btn.style.background = '#0284c7';
+            btn.style.color = '#ffffff';
+            btn.style.border = 'none';
+        }
         input.focus();
     } else {
+        // Mode affichage (consultation) : on affiche le texte et on masque la zone de saisie
+        viewDiv.style.display = 'block';
         viewDiv.classList.remove('hidden');
+        editDiv.style.display = 'none';
         editDiv.classList.add('hidden');
-        if (btnEdit) btnEdit.classList.remove('hidden');
+
+        if (btn) {
+            btn.innerHTML = '✏️ Modifier';
+            btn.style.background = 'rgba(56,189,248,0.12)';
+            btn.style.color = '#38bdf8';
+            btn.style.border = '1px solid rgba(56,189,248,0.3)';
+        }
+    }
+}
+
+// Rétrocompatibilité
+function toggleEditDiagnostic(isEditing) {
+    toggleDiagnosticMode(isEditing);
+}
+
+// Nettoyage strict des diagnostics pour Firebase (espaces -> underscores, pas d'accents ni caractères spéciaux)
+function sanitizeDiagnosticText(text) {
+    if (!text) return "";
+    return String(text)
+        .trim()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // Supprime les accents
+        .replace(/[^a-zA-Z0-9_-]/g, '_')   // Remplace espaces et caractères spéciaux par '_'
+        .replace(/_+/g, '_')               // Évite les underscores multiples
+        .replace(/^_+|_+$/g, '');          // Nettoie les extrémités
+}
+
+async function handleToggleDiagnostic() {
+    if (!isDiagnosticEditing) {
+        toggleDiagnosticMode(true);
+    } else {
+        await saveAlertDiagnostic();
     }
 }
 
 async function saveAlertDiagnostic() {
     const input = document.getElementById('alertDetailDiagInput');
-    const newDiag = input.value.trim();
-    if (!newDiag) {
+    const rawDiag = input.value.trim();
+    if (!rawDiag) {
         alert("Veuillez saisir un diagnostic avant d'enregistrer.");
         return;
     }
+
+    const cleanDiag = sanitizeDiagnosticText(rawDiag);
+    if (!cleanDiag) {
+        alert("Le diagnostic doit contenir au moins des lettres ou chiffres valides.");
+        return;
+    }
+    input.value = cleanDiag;
 
     const deviceName = currentAlertModalData ? (currentAlertModalData.device_name || currentAlertModalData.raw_device_name) : activeDeviceName;
     if (!deviceName) {
@@ -229,23 +281,38 @@ async function saveAlertDiagnostic() {
         return;
     }
 
-    const saveBtn = document.getElementById('btnSaveDiagnostic');
-    if (saveBtn) {
-        saveBtn.disabled = true;
-        saveBtn.textContent = 'Enregistrement...';
+    const btn = document.getElementById('btnToggleDiagnostic');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Enregistrement...';
     }
 
     try {
+        const historyKey = currentAlertModalData ? (currentAlertModalData.key || currentAlertModalData.id) : null;
+        const historyTs = currentAlertModalData ? (currentAlertModalData.timestamp) : null;
+
         const res = await fetch(`/api/devices/${encodeURIComponent(deviceName)}/diagnostic`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ diagnostic: newDiag })
+            body: JSON.stringify({ 
+                diagnostic: cleanDiag,
+                history_key: historyKey,
+                timestamp: historyTs
+            })
         });
         const data = await res.json();
         if (data.success) {
-            document.getElementById('alertDetailDiagnostic').textContent = newDiag;
-            if (currentAlertModalData) currentAlertModalData.diagnostic = newDiag;
-            toggleEditDiagnostic(false);
+            const finalDiag = data.diagnostic || cleanDiag;
+            document.getElementById('alertDetailDiagnostic').textContent = finalDiag;
+            if (currentAlertModalData) {
+                currentAlertModalData.diagnostic = finalDiag;
+                if (data.key) {
+                    currentAlertModalData.key = data.key;
+                    currentAlertModalData.id = data.key;
+                }
+            }
+            toggleDiagnosticMode(false);
+            if (typeof loadHistory === 'function') loadHistory();
             if (typeof loadDashboard === 'function') loadDashboard();
         } else {
             alert("Erreur lors de l'enregistrement : " + (data.error || 'Erreur inconnue'));
@@ -254,9 +321,19 @@ async function saveAlertDiagnostic() {
         console.error(err);
         alert("Erreur réseau lors de l'enregistrement sur Firebase.");
     } finally {
-        if (saveBtn) {
-            saveBtn.disabled = false;
-            saveBtn.textContent = '💾 Enregistrer sur Firebase';
+        if (btn) {
+            btn.disabled = false;
+            if (isDiagnosticEditing) {
+                btn.innerHTML = '💾 Enregistrer';
+                btn.style.background = '#0284c7';
+                btn.style.color = '#ffffff';
+                btn.style.border = 'none';
+            } else {
+                btn.innerHTML = '✏️ Modifier';
+                btn.style.background = 'rgba(56,189,248,0.12)';
+                btn.style.color = '#38bdf8';
+                btn.style.border = '1px solid rgba(56,189,248,0.3)';
+            }
         }
     }
 }
@@ -264,7 +341,7 @@ async function saveAlertDiagnostic() {
 function openAlertDetailsModal(p) {
     if (!p) return;
     currentAlertModalData = p;
-    toggleEditDiagnostic(false);
+    toggleDiagnosticMode(false);
 
     document.getElementById('alertDetailDevice').textContent = p.device_name || 'Capteur';
     document.getElementById('alertDetailTime').textContent = formatFullDateTime(p.timestamp);
@@ -328,7 +405,7 @@ function formatFullDateTime(ts) {
 // -------------------------------------------------------------
 async function loadDashboard() {
     try {
-        const response = await fetch('/api/telemetry/latest');
+        const response = await fetch('/api/historique/latest');
         const data = await response.json();
 
         // 1. Horodatage et badge
@@ -453,7 +530,7 @@ function selectHistoryMetric(metric) {
 
 async function loadHistory() {
     try {
-        let url = `/api/telemetry/history?metric=${activeHistoryMetric}&limit=200`;
+        let url = `/api/historique/history?metric=${activeHistoryMetric}&limit=200`;
         if (activeDeviceName) {
             url += `&device_name=${encodeURIComponent(activeDeviceName)}`;
         }
@@ -857,6 +934,9 @@ function openAddDeviceModal() {
 function closeModal(id) {
     const el = document.getElementById(id);
     if (el) el.classList.add('hidden');
+    if (id === 'modalAlertDetails') {
+        toggleDiagnosticMode(false);
+    }
 }
 
 function showApiKey(key) {
