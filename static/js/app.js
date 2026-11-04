@@ -192,8 +192,80 @@ function updateChart(labels, data, metricName, pointsMetadata) {
     historyChart.update('none'); // mise a jour sans saccade
 }
 
+let currentAlertModalData = null;
+
+function toggleEditDiagnostic(isEditing) {
+    const viewDiv = document.getElementById('alertDetailDiagView');
+    const editDiv = document.getElementById('alertDetailDiagEdit');
+    const btnEdit = document.getElementById('btnEditDiagnostic');
+    const input = document.getElementById('alertDetailDiagInput');
+    if (!viewDiv || !editDiv) return;
+
+    if (isEditing) {
+        viewDiv.classList.add('hidden');
+        editDiv.classList.remove('hidden');
+        if (btnEdit) btnEdit.classList.add('hidden');
+        const curText = document.getElementById('alertDetailDiagnostic').textContent.trim();
+        input.value = (curText === '--' || curText === 'Fonctionnement nominal') ? '' : curText;
+        input.focus();
+    } else {
+        viewDiv.classList.remove('hidden');
+        editDiv.classList.add('hidden');
+        if (btnEdit) btnEdit.classList.remove('hidden');
+    }
+}
+
+async function saveAlertDiagnostic() {
+    const input = document.getElementById('alertDetailDiagInput');
+    const newDiag = input.value.trim();
+    if (!newDiag) {
+        alert("Veuillez saisir un diagnostic avant d'enregistrer.");
+        return;
+    }
+
+    const deviceName = currentAlertModalData ? (currentAlertModalData.device_name || currentAlertModalData.raw_device_name) : activeDeviceName;
+    if (!deviceName) {
+        alert("Appareil non identifié.");
+        return;
+    }
+
+    const saveBtn = document.getElementById('btnSaveDiagnostic');
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Enregistrement...';
+    }
+
+    try {
+        const res = await fetch(`/api/devices/${encodeURIComponent(deviceName)}/diagnostic`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ diagnostic: newDiag })
+        });
+        const data = await res.json();
+        if (data.success) {
+            document.getElementById('alertDetailDiagnostic').textContent = newDiag;
+            if (currentAlertModalData) currentAlertModalData.diagnostic = newDiag;
+            toggleEditDiagnostic(false);
+            if (typeof loadDashboard === 'function') loadDashboard();
+        } else {
+            alert("Erreur lors de l'enregistrement : " + (data.error || 'Erreur inconnue'));
+        }
+    } catch (err) {
+        console.error(err);
+        alert("Erreur réseau lors de l'enregistrement sur Firebase.");
+    } finally {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = '💾 Enregistrer sur Firebase';
+        }
+    }
+}
+
 function openAlertDetailsModal(p) {
     if (!p) return;
+    currentAlertModalData = p;
+    toggleEditDiagnostic(false);
+
     document.getElementById('alertDetailDevice').textContent = p.device_name || 'Capteur';
     document.getElementById('alertDetailTime').textContent = formatFullDateTime(p.timestamp);
 
@@ -290,11 +362,22 @@ async function loadDashboard() {
 }
 
 let activeDeviceName = '';
+let cachedCards = [];
+
+function selectDashboardDevice(devName) {
+    activeDeviceName = devName;
+    renderLatestCards(cachedCards);
+    if (typeof loadHistory === 'function') loadHistory();
+}
 
 function renderLatestCards(cards) {
+    cachedCards = cards || [];
     const grid = document.getElementById('latestValuesGrid');
+    const tabsContainer = document.getElementById('deviceSelectorTabs');
+
     if (!cards || cards.length === 0) {
-        grid.innerHTML = '<div class="empty-state">En attente des mesures envoyées par le Raspberry Pi...</div>';
+        grid.innerHTML = '<div class="empty-state">En attente des mesures envoyées par la passerelle ESP32 4G...</div>';
+        if (tabsContainer) tabsContainer.innerHTML = '';
         renderHistoryPills('Appareil');
         return;
     }
@@ -303,6 +386,22 @@ function renderLatestCards(cards) {
     const activeCard = (activeDeviceName ? cards.find(c => c.device_name === activeDeviceName || c.raw_device_name === activeDeviceName) : null) || cards[0];
     activeDeviceName = activeCard.raw_device_name || activeCard.device_name;
     const displayDeviceName = activeCard.device_name || activeCard.raw_device_name;
+
+    // Rendu des onglets de sélection pour chaque ESP32
+    if (tabsContainer) {
+        tabsContainer.innerHTML = cards.map(c => {
+            const name = c.device_name || c.raw_device_name;
+            const isSelected = (name === displayDeviceName || c.raw_device_name === activeDeviceName);
+            const statusDot = c.status === 'ALERTE' ? '🔴' : '🟢';
+            const safeName = name.replace(/'/g, "\\'");
+            return `
+                <button class="pill-btn ${isSelected ? 'active' : ''}" 
+                        onclick="selectDashboardDevice('${safeName}')">
+                    ${statusDot} ${name}
+                </button>
+            `;
+        }).join('');
+    }
 
     const isAlert = (activeCard.status === 'ALERTE' || activeCard.anomaly_score >= (activeCard.anomaly_threshold || 8.0));
     const items = [

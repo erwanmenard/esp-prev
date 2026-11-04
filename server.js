@@ -41,6 +41,46 @@ try {
         isFirebaseConnected = true;
         console.log("🔥 Connecté à Firebase Realtime Database avec succès !");
         console.log(`📡 URL : ${DB_URL}`);
+
+        // Dédoublonnage automatique de Donnees_temps_reel basé sur l'adresse MAC
+        db.ref('Donnees_temps_reel').on('value', async (snapshot) => {
+            const data = snapshot.val();
+            if (!data) return;
+            const byMac = {};
+            for (const [key, val] of Object.entries(data)) {
+                if (!val || !val.mac) continue;
+                const mac = String(val.mac).toUpperCase().trim();
+                if (!byMac[mac]) byMac[mac] = [];
+                byMac[mac].push({ key, ts: val.timestamp_ts || 0 });
+            }
+            for (const [mac, items] of Object.entries(byMac)) {
+                if (items.length > 1) {
+                    items.sort((a, b) => b.ts - a.ts);
+                    for (let i = 1; i < items.length; i++) {
+                        console.log(`🧹 [DÉDOUBLONNAGE] Suppression de l'ancienne entrée obsolète '${items[i].key}' pour MAC ${mac} (conservée : '${items[0].key}')`);
+                        await db.ref('Donnees_temps_reel').child(items[i].key).remove().catch(() => {});
+                    }
+                }
+            }
+        });
+
+        // Archivage automatique transparent de Donnees_temps_reel vers telemetry pour l'historique des graphiques
+        const lastArchivedTs = {};
+        const archiverMesure = async (key, val) => {
+            if (!val) return;
+            const ts = parseTsSafe(val.timestamp, val.timestamp_ts) || Date.now();
+            if (lastArchivedTs[key] !== ts) {
+                lastArchivedTs[key] = ts;
+                await db.ref('telemetry').push({
+                    ...val,
+                    device_name: val.device_name || key,
+                    timestamp_ts: ts,
+                    timestamp: new Date(ts).toISOString()
+                }).catch(() => {});
+            }
+        };
+        db.ref('Donnees_temps_reel').on('child_added', snapshot => archiverMesure(snapshot.key, snapshot.val()));
+        db.ref('Donnees_temps_reel').on('child_changed', snapshot => archiverMesure(snapshot.key, snapshot.val()));
     } else if (process.env.FIREBASE_CONFIG_JSON) {
         const serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
         admin.initializeApp({
@@ -137,10 +177,23 @@ app.get('/api/devices', async (req, res) => {
                 };
             });
 
-            // Détection automatique de TOUS les appareils récents dans /telemetry
+            // Détection automatique de TOUS les appareils récents dans /Donnees_temps_reel et /telemetry
+            const seenDevices = {};
+
+            // 1. Priorité aux mesures directes en temps réel dans /Donnees_temps_reel
+            const dtrSnap = await db.ref('Donnees_temps_reel').once('value');
+            const dtrData = dtrSnap.val() || {};
+            for (const k of Object.keys(dtrData)) {
+                const item = dtrData[k];
+                if (!item) continue;
+                const dName = item.device_name || k;
+                const tTs = parseTsSafe(item.timestamp, item.timestamp_ts);
+                seenDevices[dName] = { item: { ...item, device_name: dName }, ts: tTs };
+            }
+
+            // 2. Complément avec l'historique /telemetry
             const telSnap = await db.ref('telemetry').limitToLast(100).once('value');
             const telData = telSnap.val() || {};
-            const seenDevices = {};
             for (const k of Object.keys(telData)) {
                 const item = telData[k];
                 const dName = item.device_name || "ESP32_4G_Master";
@@ -169,22 +222,9 @@ app.get('/api/devices', async (req, res) => {
                     if (item.mac && !existing.mac) existing.mac = item.mac;
                     if (item.machine_name && !existing.machine_name) existing.machine_name = item.machine_name;
 
-                    // Synchronisation du seuil IA actif mesuré par le capteur (ex: suite à auto-calibration)
-                    if (item.anomaly_threshold !== undefined) {
-                        const newTh = parseFloat(item.anomaly_threshold);
-                        const lastManualUpdate = existing.updated_at ? parseTsSafe(existing.updated_at) : 0;
-                        const isRecentManualEdit = (now - lastManualUpdate) < 15000;
-
-                        if (!isNaN(newTh) && (!isRecentManualEdit || ts > lastManualUpdate)) {
-                            if (existing.anomaly_threshold !== newTh) {
-                                existing.anomaly_threshold = newTh;
-                                // Mettre à jour Firebase /devices pour que le nouveau seuil soit persisté
-                                db.ref('devices').child(existing.id).update({
-                                    anomaly_threshold: newTh,
-                                    last_seen_ts: ts
-                                }).catch(() => {});
-                            }
-                        }
+                    // Lecture du seuil actif pour affichage en mémoire (100% lecture seule, AUCUNE écriture intempestive sur Firebase)
+                    if (item.anomaly_threshold !== undefined && existing.anomaly_threshold === undefined) {
+                        existing.anomaly_threshold = parseFloat(item.anomaly_threshold);
                     }
                 } else {
                     list.push({
@@ -324,6 +364,35 @@ app.delete('/api/devices/:id', async (req, res) => {
 
     localDevices = localDevices.filter(d => String(d.id) !== String(id));
     res.json({ success: true });
+});
+
+// -------------------------------------------------------------
+// API : ÉDITION ET ENREGISTREMENT DU DIAGNOSTIC SUR FIREBASE
+// -------------------------------------------------------------
+app.post('/api/devices/:id/diagnostic', async (req, res) => {
+    const rawId = req.params.id;
+    const { diagnostic } = req.body;
+    if (!diagnostic) return res.status(400).json({ error: "Diagnostic requis" });
+
+    const safeId = String(rawId).replace(/[:.]/g, '_').trim();
+    console.log(`📝 [DIAGNOSTIC ENREGISTRÉ] Mise à jour du diagnostic pour '${safeId}' : "${diagnostic}"`);
+
+    if (isFirebaseConnected) {
+        // 1. Enregistrement sous /Alertes/<safeId>/Diagnostic (surveillé par l'ESP32 Maître 4G pour le SMS)
+        await db.ref('Alertes').child(safeId).update({
+            Diagnostic: diagnostic,
+            timestamp_ts: Date.now()
+        }).catch(err => console.error("Erreur écriture Alertes:", err));
+
+        // 2. Enregistrement sous /Donnees_temps_reel/<safeId>/diagnostic pour affichage immédiat
+        await db.ref('Donnees_temps_reel').child(safeId).update({
+            diagnostic: diagnostic
+        }).catch(err => console.error("Erreur écriture Donnees_temps_reel:", err));
+
+        return res.json({ success: true, device: safeId, diagnostic });
+    }
+
+    res.json({ success: true, device: safeId, diagnostic });
 });
 
 // -------------------------------------------------------------
@@ -488,11 +557,24 @@ app.get('/api/telemetry/latest', async (req, res) => {
             const devData = devSnap.val() || {};
             devices = Object.keys(devData).map(k => ({ id: k, ...devData[k] }));
 
-            // Lecture des dernières mesures (branche latest)
-            const latestSnap = await db.ref('latest').once('value');
-            latestMap = latestSnap.val() || {};
+            // 1. Lecture des mesures temps réel directes depuis /Donnees_temps_reel (source principale)
+            const dtrSnap = await db.ref('Donnees_temps_reel').once('value');
+            const dtrData = dtrSnap.val() || {};
+            for (const k of Object.keys(dtrData)) {
+                const rec = dtrData[k];
+                if (!rec) continue;
+                const dName = rec.device_name || k;
+                latestMap[dName] = { ...rec, device_name: dName };
+            }
 
-            // Synchronisation avec les dernières mesures reçues dans /telemetry (pour inclure automatiquement les ESP32 4G)
+            // 2. Complément avec la branche latest si présente
+            const latestSnap = await db.ref('latest').once('value');
+            const oldLatest = latestSnap.val() || {};
+            for (const k of Object.keys(oldLatest)) {
+                if (!latestMap[k]) latestMap[k] = oldLatest[k];
+            }
+
+            // 3. Complément avec /telemetry pour inclure d'autres appareils
             const telSnap = await db.ref('telemetry').limitToLast(50).once('value');
             const telData = telSnap.val() || {};
             for (const k of Object.keys(telData)) {
@@ -505,12 +587,46 @@ app.get('/api/telemetry/latest', async (req, res) => {
                 }
             }
 
-            // Alertes ouvertes
+            // 4. Alertes ouvertes (depuis /alerts et /Alertes)
             const alSnap = await db.ref('alerts').once('value');
             const alData = alSnap.val() || {};
             openAlerts = Object.keys(alData)
                 .map(k => ({ id: k, ...alData[k] }))
                 .filter(a => a.status === 'open');
+
+            // Intégrer également les alertes actives de la branche /Alertes (API Cloud)
+            const altSnap = await db.ref('Alertes').once('value');
+            const altData = altSnap.val() || {};
+            for (const k of Object.keys(altData)) {
+                const item = altData[k];
+                if (item && item.Diagnostic && item.Diagnostic !== '""' && item.Diagnostic !== 'null') {
+                    openAlerts.push({
+                        id: k,
+                        device_name: k,
+                        status: 'open',
+                        message: item.Diagnostic,
+                        timestamp_ts: Date.now()
+                    });
+                }
+            }
+
+            // Intégrer les capteurs actuellement marqués en statut ALERTE dans Donnees_temps_reel
+            for (const k of Object.keys(dtrData)) {
+                const item = dtrData[k];
+                if (item && item.status === 'ALERTE') {
+                    const devN = item.device_name || k;
+                    if (!openAlerts.some(a => a.device_name === devN)) {
+                        openAlerts.push({
+                            id: 'dtr_' + k,
+                            device_name: devN,
+                            status: 'open',
+                            message: item.diagnostic || 'Anomalie détectée en temps réel',
+                            anomaly_score: item.anomaly_score,
+                            timestamp_ts: item.timestamp_ts || Date.now()
+                        });
+                    }
+                }
+            }
         } else {
             devices = localDevices;
             if (localTelemetry.length > 0) {
@@ -765,6 +881,46 @@ app.get('/api/alerts', async (req, res) => {
                 timestamp: formatParisFull(item.timestamp_ts || item.timestamp)
             };
         });
+
+        // Lecture des alertes actives issues de la branche /Alertes (API Cloud)
+        const altSnap = await db.ref('Alertes').once('value');
+        const altData = altSnap.val() || {};
+        for (const k of Object.keys(altData)) {
+            const item = altData[k];
+            if (item && item.Diagnostic && item.Diagnostic !== '""' && item.Diagnostic !== 'null') {
+                list.push({
+                    id: 'alt_' + k,
+                    device_name: k,
+                    message: item.Diagnostic,
+                    status: 'open',
+                    metric: 'Diagnostic IA',
+                    value: item.scoreIA || 'Anomalie',
+                    timestamp: formatParisFull(item.timestamp_ts || Date.now())
+                });
+            }
+        }
+
+        // Lecture des appareils en état ALERTE dans /Donnees_temps_reel
+        const dtrSnap = await db.ref('Donnees_temps_reel').once('value');
+        const dtrData = dtrSnap.val() || {};
+        for (const k of Object.keys(dtrData)) {
+            const item = dtrData[k];
+            if (item && item.status === 'ALERTE') {
+                const devN = item.device_name || k;
+                if (!list.some(a => a.device_name === devN && a.status === 'open')) {
+                    list.push({
+                        id: 'dtr_' + k,
+                        device_name: devN,
+                        message: item.diagnostic || 'Anomalie en cours',
+                        status: 'open',
+                        metric: 'Score IA',
+                        value: item.anomaly_score !== undefined ? `${item.anomaly_score} pts` : 'Alerte',
+                        timestamp: formatParisFull(item.timestamp_ts || Date.now())
+                    });
+                }
+            }
+        }
+
         if (status) {
             list = list.filter(a => a.status === status);
         }
@@ -781,7 +937,15 @@ app.get('/api/alerts', async (req, res) => {
 app.post('/api/alerts/:id/resolve', async (req, res) => {
     const id = req.params.id;
     if (isFirebaseConnected) {
-        await db.ref('alerts/' + id).update({ status: 'resolved' });
+        if (id.startsWith('alt_')) {
+            const cleanKey = id.replace('alt_', '');
+            await db.ref('Alertes/' + cleanKey + '/Diagnostic').set("").catch(() => {});
+        } else if (id.startsWith('dtr_')) {
+            const cleanKey = id.replace('dtr_', '');
+            await db.ref('Donnees_temps_reel/' + cleanKey + '/status').set("NORMAL").catch(() => {});
+        } else {
+            await db.ref('alerts/' + id).update({ status: 'resolved' }).catch(() => {});
+        }
         return res.json({ success: true });
     }
     const alert = localAlerts.find(a => String(a.id) === String(id));
