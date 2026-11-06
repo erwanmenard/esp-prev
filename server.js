@@ -33,7 +33,7 @@ const deviceNameByMac = {};
 // Utilitaires de nommage pour la branche Historique ({nom_esclave}/{Alerte_... ou Donnees_...})
 function getCleanDeviceKey(deviceName) {
     if (!deviceName) return "Capteur_1";
-    return String(deviceName).replace(/[\/.#$\[\]]/g, '_').trim();
+    return String(deviceName).replace(/[\/.#$\[\] ]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '').trim() || "Capteur_1";
 }
 
 function getFormattedDateTimeKey(d = new Date()) {
@@ -353,6 +353,7 @@ try {
             }
         };
         synchroniserHistoriqueAppareilsAuDemarrage();
+        setInterval(synchroniserHistoriqueAppareilsAuDemarrage, 30000);
 
         // Dédoublonnage automatique de Donnees_temps_reel basé sur l'adresse MAC
         db.ref('Donnees_temps_reel').on('value', async (snapshot) => {
