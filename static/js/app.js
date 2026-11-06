@@ -6,7 +6,6 @@ let currentView = 'dashboard';
 let activeHistoryMetric = 'anomaly_score';
 let activeDeviceId = null;
 let historyChart = null;
-let currentApiKey = '';
 let alertsFilter = 'open';
 
 // Dictionnaire des libellés et unités pour l'affichage
@@ -127,8 +126,24 @@ function initChart() {
                     const idx = points[0].index;
                     const ptData = currentHistoryPoints[idx];
                     if (ptData) {
-                        openAlertDetailsModal(ptData);
+                        const isAlert = (ptData.status === 'ALERTE' || ptData.status === 1 || (ptData.score !== undefined && ptData.score >= (ptData.threshold || 100)) || (ptData.key && ptData.key.startsWith('Alerte_')));
+                        // La modale détaillée ne s'ouvre STRICTEMENT que pour les vraies alertes IA
+                        if (isAlert) {
+                            openAlertDetailsModal(ptData);
+                        }
                     }
+                }
+            },
+            onHover: (event, chartElements) => {
+                const target = event.native ? event.native.target : (historyChart ? historyChart.canvas : null);
+                if (!target) return;
+                if (chartElements.length > 0) {
+                    const idx = chartElements[0].index;
+                    const ptData = currentHistoryPoints[idx];
+                    const isAlert = ptData && (ptData.status === 'ALERTE' || ptData.status === 1 || (ptData.score !== undefined && ptData.score >= (ptData.threshold || 100)) || (ptData.key && ptData.key.startsWith('Alerte_')));
+                    target.style.cursor = isAlert ? 'pointer' : 'default';
+                } else {
+                    target.style.cursor = 'default';
                 }
             },
             plugins: {
@@ -179,9 +194,10 @@ function updateChart(labels, data, metricName, pointsMetadata) {
     const conf = METRIC_CONFIG[metricName] || { label: 'Score IA', unit: 'pts' };
 
     // Détection des alertes pour les afficher en rouge vif cliquable
-    const pointRadii = currentHistoryPoints.map(p => (p && (p.status === 'ALERTE' || p.score >= p.threshold)) ? 6 : 0);
-    const pointColors = currentHistoryPoints.map(p => (p && (p.status === 'ALERTE' || p.score >= p.threshold)) ? '#ef4444' : '#10b981');
-    const pointHoverRadii = currentHistoryPoints.map(p => (p && (p.status === 'ALERTE' || p.score >= p.threshold)) ? 9 : 6);
+    const isPtAlert = (p) => !!(p && (p.status === 'ALERTE' || p.status === 1 || (p.score !== undefined && p.score >= (p.threshold !== undefined ? p.threshold : 100)) || (p.key && p.key.startsWith('Alerte_')) || (p.id && String(p.id).startsWith('Alerte_'))));
+    const pointRadii = currentHistoryPoints.map(p => isPtAlert(p) ? 6 : 0);
+    const pointColors = currentHistoryPoints.map(p => isPtAlert(p) ? '#ef4444' : '#10b981');
+    const pointHoverRadii = currentHistoryPoints.map(p => isPtAlert(p) ? 9 : 6);
 
     historyChart.data.labels = labels;
     historyChart.data.datasets[0].label = `${conf.label} (${conf.unit})`;
@@ -233,11 +249,6 @@ function toggleDiagnosticMode(editing) {
             btn.style.border = '1px solid rgba(56,189,248,0.3)';
         }
     }
-}
-
-// Rétrocompatibilité
-function toggleEditDiagnostic(isEditing) {
-    toggleDiagnosticMode(isEditing);
 }
 
 // Nettoyage strict des diagnostics pour Firebase (espaces -> underscores, pas d'accents ni caractères spéciaux)
@@ -340,13 +351,15 @@ async function saveAlertDiagnostic() {
 
 function openAlertDetailsModal(p) {
     if (!p) return;
+    const isAlert = (p.status === 'ALERTE' || p.status === 1 || (p.score !== undefined && p.score >= (p.threshold || 100)) || (p.key && p.key.startsWith('Alerte_')));
+    if (!isAlert) return; // Ne s'ouvre que pour une vraie alerte IA
+
     currentAlertModalData = p;
     toggleDiagnosticMode(false);
 
     document.getElementById('alertDetailDevice').textContent = p.device_name || 'Capteur';
     document.getElementById('alertDetailTime').textContent = formatFullDateTime(p.timestamp);
 
-    const isAlert = (p.status === 'ALERTE' || p.score >= p.threshold);
     const badge = document.getElementById('alertDetailOriginBadge');
     badge.textContent = p.alert_origin ? p.alert_origin.toUpperCase() : (isAlert ? 'ALERTE IA' : 'NORMAL');
     badge.style.background = isAlert ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)';
@@ -747,37 +760,6 @@ async function triggerCalibration(id, mac, btnElement) {
     }
 }
 
-async function handleCreateDevice(e) {
-    e.preventDefault();
-    const name = document.getElementById('newDeviceName').value;
-    const location = document.getElementById('newDeviceLocation').value;
-    const connection_type = document.getElementById('newDeviceType').value;
-
-    const res = await fetch('/api/devices', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, location, connection_type })
-    });
-
-    if (res.ok) {
-        closeModal('modalAddDevice');
-        document.getElementById('newDeviceName').value = '';
-        document.getElementById('newDeviceLocation').value = '';
-        loadDevices();
-    } else {
-        const err = await res.json();
-        alert(err.error || "Erreur lors de la création");
-    }
-}
-
-async function toggleDeviceActive(id, isActive) {
-    await fetch(`/api/devices/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ is_active: isActive })
-    });
-}
-
 async function deleteDevice(id) {
     if (confirm("Supprimer cet appareil et toutes ses mesures ?")) {
         await fetch(`/api/devices/${id}`, { method: 'DELETE' });
@@ -927,29 +909,12 @@ function openModal(id) {
     if (el) el.classList.remove('hidden');
 }
 
-function openAddDeviceModal() {
-    openModal('modalAddDevice');
-}
-
 function closeModal(id) {
     const el = document.getElementById(id);
     if (el) el.classList.add('hidden');
     if (id === 'modalAlertDetails') {
         toggleDiagnosticMode(false);
     }
-}
-
-function showApiKey(key) {
-    currentApiKey = key;
-    document.getElementById('displayApiKey').textContent = key;
-    document.querySelectorAll('.code-key-placeholder').forEach(el => el.textContent = key);
-    document.getElementById('modalApiKey').classList.remove('hidden');
-}
-
-function copyApiKey() {
-    navigator.clipboard.writeText(currentApiKey).then(() => {
-        alert("Clé API copiée dans le presse-papier !");
-    });
 }
 
 function formatNumber(num) {

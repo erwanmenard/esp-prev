@@ -28,6 +28,7 @@ let db = null;
 let isFirebaseConnected = false;
 const lastArchivedTs = {};
 const updatingDiagnosticDevices = new Set();
+const deviceNameByMac = {};
 
 // Utilitaires de nommage pour la branche Historique ({nom_esclave}/{Alerte_... ou Donnees_...})
 function getCleanDeviceKey(deviceName) {
@@ -36,14 +37,26 @@ function getCleanDeviceKey(deviceName) {
 }
 
 function getFormattedDateTimeKey(d = new Date()) {
-    const pad = n => String(n).padStart(2, '0');
-    const yyyy = d.getFullYear();
-    const MM = pad(d.getMonth() + 1);
-    const dd = pad(d.getDate());
-    const HH = pad(d.getHours());
-    const mm = pad(d.getMinutes());
-    const ss = pad(d.getSeconds());
-    return `${yyyy}${MM}${dd}_${HH}${mm}${ss}`;
+    // Forcer le fuseau horaire Europe/Paris (UTC+1 en hiver, UTC+2 en été)
+    // pour garantir une clé strictement identique que le serveur tourne en local sur Windows
+    // ou dans le cloud sur Render (qui tourne en UTC par défaut)
+    const formatter = new Intl.DateTimeFormat('fr-FR', {
+        timeZone: 'Europe/Paris',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
+    const parts = formatter.formatToParts(d);
+    const p = {};
+    for (const item of parts) {
+        p[item.type] = item.value;
+    }
+    const HH = p.hour === '24' ? '00' : p.hour;
+    return `${p.year}${p.month}${p.day}_${HH}${p.minute}${p.second}`;
 }
 
 function generateHistoryEntryKey(val, ts) {
@@ -68,6 +81,124 @@ function generateHistoryEntryKey(val, ts) {
     }
 }
 
+// Migration et synchronisation complète de l'Historique (et des branches associées) lors du renommage d'un capteur/ESP32
+async function migrerHistoriqueAppareil(oldNameOrId, newName, mac) {
+    if (!db || !isFirebaseConnected || !newName) return;
+
+    const newClean = getCleanDeviceKey(newName);
+
+    // Toutes les variantes possibles de l'ancien nom pour être certain de trouver la branche
+    const candidates = new Set();
+    if (oldNameOrId) {
+        candidates.add(String(oldNameOrId).trim());
+        candidates.add(getCleanDeviceKey(oldNameOrId));
+        candidates.add(String(oldNameOrId).replace(/[:.]/g, '_').trim());
+        candidates.add(String(oldNameOrId).replace(/_/g, ' ').trim());
+        candidates.add(String(oldNameOrId).replace(/ /g, '_').trim());
+    }
+    candidates.add(newName.replace(/_/g, ' ').trim());
+    candidates.add(newName.replace(/ /g, '_').trim());
+
+    try {
+        const histSnap = await db.ref('Historique').once('value');
+        const histVal = histSnap.val() || {};
+
+        // Trouver toutes les branches dans Historique correspondant à l'ancien appareil
+        const branchesToMigrate = [];
+
+        for (const branchKey of Object.keys(histVal)) {
+            if (branchKey === newClean) continue; // Ne pas migrer la branche cible sur elle-même
+
+            let isMatch = candidates.has(branchKey) || 
+                          branchKey.replace(/_/g, ' ') === newName.replace(/_/g, ' ') ||
+                          branchKey.replace(/ /g, '_') === newName.replace(/ /g, '_');
+
+            // Si une adresse MAC est connue, vérifier si les entrées de cette branche appartiennent à cette MAC
+            if (!isMatch && mac) {
+                const targetMacUpper = String(mac).toUpperCase().trim();
+                const branchEntries = histVal[branchKey];
+                if (branchEntries && typeof branchEntries === 'object') {
+                    for (const entry of Object.values(branchEntries)) {
+                        if (entry && entry.mac && String(entry.mac).toUpperCase().trim() === targetMacUpper) {
+                            isMatch = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (isMatch) {
+                branchesToMigrate.push(branchKey);
+            }
+        }
+
+        for (const oldBranch of branchesToMigrate) {
+            console.log(`🔄 [MIGRATION HISTORIQUE] Déplacement des données de 'Historique/${oldBranch}' vers 'Historique/${newClean}'...`);
+            const oldEntries = histVal[oldBranch];
+            if (oldEntries && typeof oldEntries === 'object') {
+                let count = 0;
+                for (const [entryKey, entryData] of Object.entries(oldEntries)) {
+                    if (!entryData || typeof entryData !== 'object') continue;
+                    const { id: _unusedId, key: _unusedKey, ...cleanData } = entryData;
+                    await db.ref('Historique').child(newClean).child(entryKey).set({
+                        ...cleanData,
+                        device_name: newName
+                    });
+                    count++;
+                }
+                await db.ref('Historique').child(oldBranch).remove().catch(() => {});
+                console.log(`✅ [MIGRATION HISTORIQUE] ${count} mesures transférées avec succès de '${oldBranch}' vers '${newClean}' !`);
+            }
+        }
+
+        // Nettoyage / migration dans Donnees_temps_reel
+        for (const oldBranch of branchesToMigrate) {
+            const dtrSnap = await db.ref('Donnees_temps_reel').child(oldBranch).once('value');
+            if (dtrSnap.exists()) {
+                const dtrVal = dtrSnap.val();
+                if (dtrVal && typeof dtrVal === 'object') {
+                    await db.ref('Donnees_temps_reel').child(newClean).set({
+                        ...dtrVal,
+                        device_name: newName
+                    });
+                }
+                await db.ref('Donnees_temps_reel').child(oldBranch).remove().catch(() => {});
+                console.log(`🧹 [DONNEES_TEMPS_REEL] Ancienne clé '${oldBranch}' migrée vers '${newClean}'.`);
+            }
+        }
+
+        // Nettoyage / migration dans Alertes
+        for (const oldBranch of branchesToMigrate) {
+            const alerteSnap = await db.ref('Alertes').child(oldBranch).once('value');
+            if (alerteSnap.exists()) {
+                const alerteVal = alerteSnap.val();
+                if (alerteVal && typeof alerteVal === 'object') {
+                    await db.ref('Alertes').child(newClean).set(alerteVal);
+                }
+                await db.ref('Alertes').child(oldBranch).remove().catch(() => {});
+                console.log(`🧹 [ALERTES] Ancienne branche '${oldBranch}' migrée vers '${newClean}'.`);
+            }
+        }
+
+        // Nettoyage / migration dans latest
+        for (const oldBranch of branchesToMigrate) {
+            const latSnap = await db.ref('latest').child(oldBranch).once('value');
+            if (latSnap.exists()) {
+                const latVal = latSnap.val();
+                if (latVal && typeof latVal === 'object') {
+                    await db.ref('latest').child(newClean).set({
+                        ...latVal,
+                        device_name: newName
+                    });
+                }
+                await db.ref('latest').child(oldBranch).remove().catch(() => {});
+            }
+        }
+    } catch (err) {
+        console.error("Erreur lors de la migration d'historique de l'appareil:", err);
+    }
+}
+
 try {
     const admin = require('firebase-admin');
     const serviceAccountPath = path.resolve(__dirname, process.env.FIREBASE_SERVICE_ACCOUNT_PATH || 'serviceAccountKey.json');
@@ -83,59 +214,145 @@ try {
         console.log("🔥 Connecté à Firebase Realtime Database avec succès !");
         console.log(`📡 URL : ${DB_URL}`);
 
-        // Nettoyage des anciennes branches devenues inutiles
-        db.ref('historique_counters').remove().catch(() => {});
-        db.ref('telemetry').remove().catch(() => {});
-
-        // Fusion automatique et sécurisée de historique_test vers Historique (sans écrasement)
-        const fusionnerHistoriqueTestVersHistorique = async () => {
-            try {
-                const testSnap = await db.ref('historique_test').once('value');
-                const testData = testSnap.val();
-                if (testData && typeof testData === 'object') {
-                    console.log("🔄 [FUSION] Migration des données de 'historique_test' vers 'Historique' en cours...");
-                    let count = 0;
-                    for (const [devKey, entries] of Object.entries(testData)) {
-                        if (!entries || typeof entries !== 'object') continue;
-                        for (const [entryKey, entryVal] of Object.entries(entries)) {
-                            if (!entryVal || typeof entryVal !== 'object') continue;
-                            await db.ref('Historique').child(devKey).child(entryKey).set(entryVal);
-                            count++;
-                        }
-                    }
-                    console.log(`✅ [FUSION RÉUSSIE] ${count} mesures fusionnées avec succès dans 'Historique' sans écrasement !`);
-                }
-            } catch (err) {
-                console.error("Erreur lors de la fusion vers Historique:", err);
-            }
-        };
-        fusionnerHistoriqueTestVersHistorique();
-
-        // Nettoyage des champs redondants (id, key) dans Historique pour garder Firebase propre
-        const nettoyerChampsRedondantsHistorique = async () => {
+        // Déduplonnage automatique de Historique (supprime les doublons générés par l'écart de fuseau horaire UTC vs Paris et les alertes dupliquées)
+        const dedupliquerHistorique = async () => {
             try {
                 const histSnap = await db.ref('Historique').once('value');
                 const histVal = histSnap.val();
-                if (histVal && typeof histVal === 'object') {
-                    for (const [devKey, entries] of Object.entries(histVal)) {
-                        if (!entries || typeof entries !== 'object') continue;
-                        for (const [entryKey, entryVal] of Object.entries(entries)) {
-                            if (!entryVal || typeof entryVal !== 'object') continue;
-                            if (entryVal.id !== undefined) {
-                                await db.ref('Historique').child(devKey).child(entryKey).child('id').remove().catch(() => {});
-                            }
-                            if (entryVal.key !== undefined) {
-                                await db.ref('Historique').child(devKey).child(entryKey).child('key').remove().catch(() => {});
+                if (!histVal || typeof histVal !== 'object') return;
+
+                for (const [devKey, entries] of Object.entries(histVal)) {
+                    if (!entries || typeof entries !== 'object') continue;
+                    const items = Object.entries(entries).map(([eKey, val]) => ({
+                        key: eKey,
+                        val: val,
+                        ts: val && typeof val === 'object' ? (typeof val.timestamp_ts === 'number' ? val.timestamp_ts : parseTsSafe(val.timestamp)) : 0
+                    })).filter(x => x.ts > 0);
+
+                    // Trier par timestamp croissant
+                    items.sort((a, b) => a.ts - b.ts);
+
+                    for (let i = 0; i < items.length - 1; i++) {
+                        for (let j = i + 1; j < items.length; j++) {
+                            // Même timestamp physique à moins de 2000ms
+                            if (Math.abs(items[i].ts - items[j].ts) < 2000) {
+                                let toDelete = null;
+
+                                const itemI = items[i];
+                                const itemJ = items[j];
+
+                                const isAlertI = itemI.key.startsWith('Alerte_');
+                                const isAlertJ = itemJ.key.startsWith('Alerte_');
+
+                                // Cas 1 : Deux alertes pour le même événement (ex: Alerte_1_... créée par l'IA vs Alerte_2_... créée par server.js)
+                                if (isAlertI && isAlertJ) {
+                                    const hasDiagI = !!(itemI.val && (itemI.val.Diagnostic || itemI.val.Heure || itemI.val.Jour));
+                                    const hasDiagJ = !!(itemJ.val && (itemJ.val.Diagnostic || itemJ.val.Heure || itemJ.val.Jour));
+
+                                    if (hasDiagI && !hasDiagJ) {
+                                        toDelete = itemJ.key; // Supprimer le doublon non qualifié créé par server.js
+                                    } else if (hasDiagJ && !hasDiagI) {
+                                        toDelete = itemI.key; // Supprimer le doublon non qualifié créé par server.js
+                                    } else {
+                                        // Si l'une des deux a un nom de diagnostic qualifié (ex: Alerte_Panne_moteur_...) et l'autre un simple ID (Alerte_1_...)
+                                        const isNamedI = !itemI.key.match(/^Alerte_\d+_/);
+                                        const isNamedJ = !itemJ.key.match(/^Alerte_\d+_/);
+                                        if (isNamedI && !isNamedJ) {
+                                            toDelete = itemJ.key;
+                                        } else if (isNamedJ && !isNamedI) {
+                                            toDelete = itemI.key;
+                                        } else if (itemI.key !== itemJ.key) {
+                                            toDelete = itemI.key < itemJ.key ? itemI.key : itemJ.key;
+                                        }
+                                    }
+                                } 
+                                // Cas 2 : Une alerte et une donnée normale au même timestamp -> garder l'alerte prioritaire
+                                else if (isAlertI && !isAlertJ) {
+                                    toDelete = itemJ.key;
+                                } else if (isAlertJ && !isAlertI) {
+                                    toDelete = itemI.key;
+                                } 
+                                // Cas 3 : Deux données normales 'Donnees_...'
+                                else if (itemI.key !== itemJ.key) {
+                                    const expectedKey = generateHistoryEntryKey(itemI.val, itemI.ts);
+                                    if (itemI.key === expectedKey && itemJ.key !== expectedKey) {
+                                        toDelete = itemJ.key;
+                                    } else if (itemJ.key === expectedKey && itemI.key !== expectedKey) {
+                                        toDelete = itemI.key;
+                                    } else {
+                                        toDelete = itemI.key < itemJ.key ? itemI.key : itemJ.key;
+                                    }
+                                }
+
+                                if (toDelete) {
+                                    console.log(`🧹 [DÉDOUBLONNAGE HISTORIQUE] Suppression du doublon '${toDelete}' pour '${devKey}'`);
+                                    await db.ref('Historique').child(devKey).child(toDelete).remove().catch(() => {});
+                                }
                             }
                         }
                     }
-                    console.log("🧹 [FIREBASE] Champs redondants 'id' et 'key' retirés avec succès de la branche 'Historique'.");
                 }
             } catch (err) {
-                console.error("Erreur nettoyage champs redondants Historique:", err);
+                console.error("Erreur dédoublonnage Historique:", err);
             }
         };
-        nettoyerChampsRedondantsHistorique();
+        dedupliquerHistorique();
+
+        // Mise en cache temps réel des noms d'appareils par adresse MAC pour une cohérence absolue
+        db.ref('devices').on('value', snap => {
+            const val = snap.val();
+            if (val && typeof val === 'object') {
+                for (const [k, d] of Object.entries(val)) {
+                    if (d && d.mac) {
+                        deviceNameByMac[String(d.mac).toUpperCase()] = d.name || k;
+                    }
+                }
+            }
+        });
+
+        // Synchronisation automatique au démarrage : si un appareil a été renommé mais que son Historique
+        // est encore sous l'ancien nom (ex: "Esclave test" vs "Esclave_test")
+        const synchroniserHistoriqueAppareilsAuDemarrage = async () => {
+            try {
+                const devSnap = await db.ref('devices').once('value');
+                const devVal = devSnap.val() || {};
+                const histSnap = await db.ref('Historique').once('value');
+                const histVal = histSnap.val() || {};
+
+                for (const [dKey, dItem] of Object.entries(devVal)) {
+                    if (!dItem) continue;
+                    const curName = dItem.name || dKey;
+                    const curClean = getCleanDeviceKey(curName);
+                    const mac = dItem.mac;
+
+                    for (const histKey of Object.keys(histVal)) {
+                        if (histKey === curClean) continue;
+
+                        const isSpaceUnderscoreMatch = 
+                            histKey.replace(/_/g, ' ') === curClean.replace(/_/g, ' ') ||
+                            histKey.replace(/ /g, '_') === curClean.replace(/ /g, '_');
+                        
+                        let isMacMatch = false;
+                        if (mac && histVal[histKey] && typeof histVal[histKey] === 'object') {
+                            for (const entry of Object.values(histVal[histKey])) {
+                                if (entry && entry.mac && String(entry.mac).toUpperCase() === String(mac).toUpperCase()) {
+                                    isMacMatch = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (isSpaceUnderscoreMatch || isMacMatch) {
+                            console.log(`🔄 [AUTO-SYNC RENOMMAGE] Synchronisation détectée : '${histKey}' doit être migré vers '${curClean}'`);
+                            await migrerHistoriqueAppareil(histKey, curName, mac);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("Erreur synchronisation Historique au démarrage:", err);
+            }
+        };
+        synchroniserHistoriqueAppareilsAuDemarrage();
 
         // Dédoublonnage automatique de Donnees_temps_reel basé sur l'adresse MAC
         db.ref('Donnees_temps_reel').on('value', async (snapshot) => {
@@ -163,16 +380,30 @@ try {
         const archiverMesure = async (key, val) => {
             if (!val || typeof val !== 'object') return;
 
-            const devName = val.device_name || key;
+            let devName = val.device_name || key;
+            if (val.mac && deviceNameByMac[String(val.mac).toUpperCase()]) {
+                devName = deviceNameByMac[String(val.mac).toUpperCase()];
+            }
             const safeDev = getCleanDeviceKey(devName);
 
             // Horodatage réel du capteur (ne JAMAIS utiliser Date.now() pour éviter les fausses mesures en boucle)
             const ts = typeof val.timestamp_ts === 'number' ? val.timestamp_ts : parseTsSafe(val.timestamp);
             if (!ts || isNaN(ts) || ts <= 0) return;
 
+            // Détection alerte : les alertes sont déjà gérées et archivées dans /Historique par le système d'analyse IA externe
+            // (avec son ID officiel Anomalie_inconnu_X, ses champs Diagnostic, Heure, Jour, et son lien dans /Anomalies).
+            // Ne JAMAIS archiver de seconde alerte depuis server.js pour éliminer définitivement les doublons !
+            const isAlert = (val && (val.status === 'ALERTE' || val.status === 1 || (val.anomaly_score !== undefined && val.anomaly_score >= (val.anomaly_threshold !== undefined ? val.anomaly_threshold : 100))));
+            if (isAlert) {
+                return;
+            }
+
+            const isDuplicate = (lastArchivedTs[key] && Math.abs(lastArchivedTs[key] - ts) < 2000) ||
+                                (lastArchivedTs[safeDev] && Math.abs(lastArchivedTs[safeDev] - ts) < 2000);
+
             // Si cette modification provient de l'édition d'un diagnostic et que le timestamp n'a pas changé : on ignore
             if (updatingDiagnosticDevices.has(key) || updatingDiagnosticDevices.has(safeDev)) {
-                if (lastArchivedTs[key] && Math.abs(lastArchivedTs[key] - ts) < 2000) {
+                if (isDuplicate) {
                     return;
                 }
                 // Si le timestamp a changé, c'est une VRAIE nouvelle mesure de l'ESP32 arrivée en même temps : on la traite !
@@ -181,10 +412,11 @@ try {
             }
 
             // Détection stricte de doublon : si la mesure a déjà été archivée pour ce capteur, on ignore
-            if (lastArchivedTs[key] && Math.abs(lastArchivedTs[key] - ts) < 2000) {
+            if (isDuplicate) {
                 return;
             }
             lastArchivedTs[key] = ts;
+            lastArchivedTs[safeDev] = ts;
 
             const entryKey = generateHistoryEntryKey(val, ts);
             const { id: _unusedId, key: _unusedKey, ...cleanVal } = val;
@@ -194,6 +426,27 @@ try {
                 timestamp_ts: ts,
                 timestamp: new Date(ts).toISOString()
             }).catch(err => console.error("Erreur archivage Historique:", err));
+
+            // Détection et suppression immédiate de tout doublon résiduel en temps réel (ex: écrit par Render ou un serveur en UTC)
+            setTimeout(async () => {
+                try {
+                    const snap = await db.ref('Historique').child(safeDev).limitToLast(10).once('value');
+                    const entries = snap.val();
+                    if (entries && typeof entries === 'object') {
+                        for (const [eKey, eVal] of Object.entries(entries)) {
+                            if (eKey === entryKey) continue;
+                            if (eKey.startsWith('Alerte_')) continue; // Ne JAMAIS supprimer une alerte lors de l'archivage d'une donnée normale !
+                            const eTs = (eVal && typeof eVal === 'object') ? (eVal.timestamp_ts || parseTsSafe(eVal.timestamp)) : 0;
+                            if (eTs && Math.abs(eTs - ts) < 2000) {
+                                console.log(`🧹 [ANTI-DOUBLON TEMPS RÉEL] Suppression du doublon obsolète '${eKey}' pour '${safeDev}' (conservé : '${entryKey}')`);
+                                await db.ref('Historique').child(safeDev).child(eKey).remove().catch(() => {});
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error("Erreur nettoyage doublon temps réel:", err);
+                }
+            }, 500);
         };
         db.ref('Donnees_temps_reel').on('child_added', snapshot => archiverMesure(snapshot.key, snapshot.val()));
         db.ref('Donnees_temps_reel').on('child_changed', snapshot => archiverMesure(snapshot.key, snapshot.val()));
@@ -427,15 +680,24 @@ app.put('/api/devices/:id', async (req, res) => {
 
     if (isFirebaseConnected) {
         // 1. Mettre à jour dans /devices (avec migration de la clé si le nom a changé)
+        const oldSnap = await db.ref('devices').child(safeId).once('value');
+        const oldVal = oldSnap.val() || {};
+        const oldName = oldVal.name || rawId;
+
         const newKey = String(updates.name || safeId).replace(/[:.]/g, '_').trim();
         if (newKey && newKey !== safeId) {
-            const oldSnap = await db.ref('devices').child(safeId).once('value');
-            const oldVal = oldSnap.val() || {};
             await db.ref('devices').child(newKey).set({ ...oldVal, ...updates });
             await db.ref('devices').child(safeId).remove();
             console.log(`🔄 [FIREBASE] Appareil migré de /devices/${safeId} vers /devices/${newKey}`);
         } else {
             await db.ref('devices').child(safeId).update(updates);
+        }
+
+        // Migration immédiate de tout l'historique et des branches associées vers le nouveau nom
+        const targetMac = mac || updates.mac || oldVal.mac || rawId;
+        await migrerHistoriqueAppareil(oldName, updates.name, targetMac);
+        if (safeId !== oldName) {
+            await migrerHistoriqueAppareil(safeId, updates.name, targetMac);
         }
 
         // 2. Mettre à jour dans /latest pour affichage temps réel immédiat
@@ -452,7 +714,6 @@ app.put('/api/devices/:id', async (req, res) => {
         }
 
         // 3. Créer un ordre dans /commands pour que la passerelle 4G synchronise le nom, la machine, le lieu et le seuil IA
-        const targetMac = mac || rawId;
         const cmdKey = String(targetMac).replace(/[:.]/g, '_');
         const cmdPayload = {
             mac: targetMac,
@@ -592,80 +853,34 @@ app.post('/api/devices/:id/diagnostic', async (req, res) => {
         // Si oldAnomalyId n'a pas été capturé dans la clé, vérifier les propriétés de la donnée
         if (!oldAnomalyId && entryData) {
             oldAnomalyId = entryData.cause_id || entryData.cause || entryData.alert_id || null;
+            if (!oldAnomalyId && entryData.Diagnostic) {
+                const dMatch = String(entryData.Diagnostic).match(/(\d+)$/);
+                if (dMatch) oldAnomalyId = dMatch[1];
+            }
         }
 
-        // Si l'alerte est liée à un ID d'anomalie, propager à TOUTES les alertes partageant cet ID sur tous les capteurs (Option 1)
-        if (oldAnomalyId) {
-            const allHistSnap = await db.ref('Historique').once('value');
-            const allHistVal = allHistSnap.val() || {};
-            let batchCount = 0;
+        // 3. Mise à jour et renommage STRICTEMENT et UNIQUEMENT de l'alerte ciblée dans Historique
+        const { id: _tId, key: _tKey, ...cleanEntryData } = entryData;
+        const updatedEntry = {
+            ...cleanEntryData,
+            diagnostic: cleanDiag,
+            Diagnostic: cleanDiag
+        };
 
-            for (const [devKey, devEntries] of Object.entries(allHistVal)) {
-                if (!devEntries || typeof devEntries !== 'object') continue;
-
-                for (const [eKey, eVal] of Object.entries(devEntries)) {
-                    if (!eVal || typeof eVal !== 'object') continue;
-
-                    // Vérifier si cette entrée correspond au même ID d'anomalie
-                    let isSameAnomaly = false;
-                    const m = eKey.match(/^Alerte_(.+)_(\d{8}_\d{6})$/);
-                    if (m && String(m[1]) === String(oldAnomalyId)) {
-                        isSameAnomaly = true;
-                    } else if (eVal.cause_id && String(eVal.cause_id) === String(oldAnomalyId)) {
-                        isSameAnomaly = true;
-                    } else if (eVal.cause && String(eVal.cause) === String(oldAnomalyId)) {
-                        isSameAnomaly = true;
-                    } else if (eVal.alert_id && String(eVal.alert_id) === String(oldAnomalyId)) {
-                        isSameAnomaly = true;
-                    }
-
-                    if (isSameAnomaly) {
-                        const dateM = eKey.match(/_(\d{8}_\d{6})$/);
-                        const dtPart = dateM ? dateM[1] : getFormattedDateTimeKey(new Date(eVal.timestamp_ts || Date.now()));
-                        const newEntryKey = `Alerte_${cleanDiag}_${dtPart}`;
-
-                        const { id: _eId, key: _eKey, ...cleanEVal } = eVal;
-                        const updatedRecord = {
-                            ...cleanEVal,
-                            diagnostic: cleanDiag
-                        };
-
-                        if (newEntryKey !== eKey) {
-                            await db.ref('Historique').child(devKey).child(newEntryKey).set(updatedRecord);
-                            await db.ref('Historique').child(devKey).child(eKey).remove().catch(() => {});
-                            console.log(`🔄 [HISTORIQUE BATCH] '${devKey}/${eKey}' ➔ '${devKey}/${newEntryKey}' (diagnostic: "${cleanDiag}")`);
-                        } else {
-                            await db.ref('Historique').child(devKey).child(eKey).update({ diagnostic: cleanDiag });
-                        }
-
-                        if (devKey === safeDev && eKey === targetKey) {
-                            newKey = newEntryKey;
-                        }
-                        batchCount++;
-                    }
-                }
-            }
-            console.log(`🏷️ [HISTORIQUE BATCH] ${batchCount} alertes associées à l'ID '${oldAnomalyId}' ont été mises à jour avec le diagnostic "${cleanDiag}"`);
-        } else {
-            // Cas où l'alerte n'avait pas d'ID particulier : simple mise à jour individuelle
-            const { id: _tId, key: _tKey, ...cleanEntryData } = entryData;
-            const updatedEntry = {
-                ...cleanEntryData,
-                diagnostic: cleanDiag
-            };
-
-            if (newKey !== targetKey) {
-                await db.ref('Historique').child(safeDev).child(newKey).set(updatedEntry);
-                if (isRootKey) {
-                    await db.ref('Historique').child(targetKey).remove().catch(() => {});
-                } else {
-                    await db.ref('Historique').child(safeDev).child(targetKey).remove().catch(() => {});
-                }
-                console.log(`🔄 [HISTORIQUE] Clé renommée avec succès : '${safeDev}/${targetKey}' ➔ '${safeDev}/${newKey}'`);
+        if (newKey !== targetKey) {
+            await db.ref('Historique').child(safeDev).child(newKey).set(updatedEntry);
+            if (isRootKey) {
+                await db.ref('Historique').child(targetKey).remove().catch(() => {});
             } else {
-                await db.ref('Historique').child(safeDev).child(targetKey).update({ diagnostic: cleanDiag });
-                console.log(`✅ [HISTORIQUE] Diagnostic mis à jour pour '${safeDev}/${targetKey}'`);
+                await db.ref('Historique').child(safeDev).child(targetKey).remove().catch(() => {});
             }
+            console.log(`🔄 [HISTORIQUE] Alerte ciblée renommée avec succès : '${safeDev}/${targetKey}' ➔ '${safeDev}/${newKey}' (diagnostic: "${cleanDiag}")`);
+        } else {
+            await db.ref('Historique').child(safeDev).child(targetKey).update({ 
+                diagnostic: cleanDiag,
+                Diagnostic: cleanDiag 
+            });
+            console.log(`✅ [HISTORIQUE] Diagnostic mis à jour pour '${safeDev}/${targetKey}' : "${cleanDiag}"`);
         }
 
         // 4. Mise à jour de la branche /Anomalies (Option A : Anomalies/<cleanDiag> avec Nom: "<cleanDiag>")
@@ -677,8 +892,8 @@ app.post('/api/devices/:id/diagnostic', async (req, res) => {
 
             let targetAnomalyKey = null;
 
+            // 4.1 Recherche par identifiant direct (ex: "4", "Anomalie_inconnu_4", etc.)
             if (oldAnomalyId) {
-                // Recherche de la clé existante (ex: "Anomalie_inconnu_2", "Anomalie_inconnue_2", "Anomalie_2", etc.)
                 const candidates = [
                     `Anomalie_inconnu_${oldAnomalyId}`,
                     `Anomalie_inconnue_${oldAnomalyId}`,
@@ -692,7 +907,7 @@ app.post('/api/devices/:id/diagnostic', async (req, res) => {
                     }
                 }
 
-                // Recherche insensible à la casse si pas trouvé directement
+                // Recherche insensible à la casse
                 if (!targetAnomalyKey) {
                     const lowerSearch = `anomalie_inconnu_${oldAnomalyId}`.toLowerCase();
                     for (const k of Object.keys(anomaliesVal)) {
@@ -704,11 +919,79 @@ app.post('/api/devices/:id/diagnostic', async (req, res) => {
                 }
             }
 
-            const newAnomalyNodeKey = cleanDiag; // Option A : ex "panne_ventillateur"
+            // 4.2 Recherche par précédent diagnostic dans Nom ou dans Donnees_en_cours_enregistrement
+            if (!targetAnomalyKey && entryData && entryData.diagnostic) {
+                const prevDiagClean = sanitizeDiagnostic(entryData.diagnostic);
+                for (const [k, item] of Object.entries(anomaliesVal)) {
+                    if (!item || typeof item !== 'object') continue;
+                    if (item.Nom === entryData.diagnostic || sanitizeDiagnostic(item.Nom) === prevDiagClean || k === prevDiagClean) {
+                        targetAnomalyKey = k;
+                        break;
+                    }
+                    if (item.Donnees_en_cours_enregistrement && item.Donnees_en_cours_enregistrement.diagnostic === entryData.diagnostic) {
+                        targetAnomalyKey = k;
+                        break;
+                    }
+                }
+            }
+
+            // 4.3 Recherche par correspondance exacte des mesures / horodatage dans Donnees_en_cours_enregistrement
+            if (!targetAnomalyKey && entryData) {
+                const targetTs = entryData.timestamp_ts || parseTsSafe(entryData.timestamp);
+                let minDiff = Infinity;
+                let bestKey = null;
+
+                for (const [k, item] of Object.entries(anomaliesVal)) {
+                    if (!item || typeof item !== 'object') continue;
+                    const rec = item.Donnees_en_cours_enregistrement;
+                    if (rec && typeof rec === 'object') {
+                        const recTs = rec.timestamp_ts || parseTsSafe(rec.timestamp);
+                        if (recTs && targetTs) {
+                            const diff = Math.abs(recTs - targetTs);
+                            const sameDev = (!rec.device_name || rec.device_name === safeDev || rec.device_name === entryData.device_name);
+                            const sameMac = (!rec.mac || !entryData.mac || rec.mac.toUpperCase() === entryData.mac.toUpperCase());
+                            if (diff < minDiff && diff < 15000 && (sameDev || sameMac)) {
+                                minDiff = diff;
+                                bestKey = k;
+                            }
+                        }
+                    }
+                }
+                if (bestKey) {
+                    targetAnomalyKey = bestKey;
+                    console.log(`🎯 [ANOMALIES] Nœud trouvé par correspondance de mesures/timestamp : '${bestKey}'`);
+                }
+            }
+
+            const newAnomalyNodeKey = cleanDiag; // Option A : ex "Vibration_anormale"
             let existingAnomalyData = {};
 
             if (targetAnomalyKey && anomaliesVal[targetAnomalyKey] && typeof anomaliesVal[targetAnomalyKey] === 'object') {
                 existingAnomalyData = anomaliesVal[targetAnomalyKey];
+            }
+
+            // Conservation absolue de Donnees_en_cours_enregistrement
+            let donneesEnreg = existingAnomalyData.Donnees_en_cours_enregistrement;
+
+            // Si non trouvé dans l'ancien nœud, on le récupère depuis les vraies données physiques de l'alerte !
+            if (!donneesEnreg && entryData) {
+                donneesEnreg = {
+                    alert_origin: entryData.alert_origin || "GENERAL",
+                    anomaly_score: entryData.anomaly_score !== undefined ? entryData.anomaly_score : 0,
+                    anomaly_threshold: entryData.anomaly_threshold !== undefined ? entryData.anomaly_threshold : 8.0,
+                    connection_type: entryData.connection_type || "4G",
+                    device_name: entryData.device_name || safeDev,
+                    diagnostic: cleanDiag,
+                    mac: entryData.mac || "",
+                    sound_rms: entryData.sound_rms !== undefined ? entryData.sound_rms : (entryData.sound_mean || 0),
+                    status: entryData.status || "ALERTE",
+                    timestamp_ts: entryData.timestamp_ts || parseTsSafe(entryData.timestamp) || Date.now(),
+                    vibration_peak: entryData.vibration_peak !== undefined ? entryData.vibration_peak : 0,
+                    vibration_rms: entryData.vibration_rms !== undefined ? entryData.vibration_rms : (entryData.vibration_mean || 0)
+                };
+            } else if (donneesEnreg) {
+                // Si déjà présent, on actualise le diagnostic avec le nouveau libellé
+                donneesEnreg.diagnostic = cleanDiag;
             }
 
             const newAnomalyPayload = {
@@ -716,9 +999,13 @@ app.post('/api/devices/:id/diagnostic', async (req, res) => {
                 Nom: cleanDiag
             };
 
-            // Écriture du nœud sous Anomalies/<cleanDiag>
+            if (donneesEnreg) {
+                newAnomalyPayload.Donnees_en_cours_enregistrement = donneesEnreg;
+            }
+
+            // Écriture du nœud complet sous Anomalies/<cleanDiag>
             await anomaliesRef.child(newAnomalyNodeKey).set(newAnomalyPayload);
-            console.log(`🏷️ [ANOMALIES] Nœud '${newAnomalyNodeKey}' enregistré avec Nom: "${cleanDiag}"`);
+            console.log(`🏷️ [ANOMALIES] Nœud '${newAnomalyNodeKey}' enregistré avec Nom: "${cleanDiag}" et Donnees_en_cours_enregistrement conservées !`);
 
             // Suppression de l'ancien nœud si son nom était différent
             if (targetAnomalyKey && targetAnomalyKey !== newAnomalyNodeKey) {
@@ -777,12 +1064,14 @@ app.post('/api/telemetry', async (req, res) => {
     const alertsTriggered = [];
 
     if (isFirebaseConnected) {
-        // Enregistrer la mesure dans Historique sous {nom_esclave}/{entree} et dans la branche latest
+        // Enregistrer la mesure dans Historique sous {nom_esclave}/{entree} (si ce n'est pas une alerte déjà gérée par l'IA) et dans latest
         const safeDev = getCleanDeviceKey(deviceName);
-        const entryKey = generateHistoryEntryKey(record, nowTs);
-        await db.ref('Historique').child(safeDev).child(entryKey).set({
-            ...record
-        }).catch(err => console.error("Erreur écriture Historique:", err));
+        if (record.status !== 'ALERTE') {
+            const entryKey = generateHistoryEntryKey(record, nowTs);
+            await db.ref('Historique').child(safeDev).child(entryKey).set({
+                ...record
+            }).catch(err => console.error("Erreur écriture Historique:", err));
+        }
         await db.ref('latest/' + deviceName).set(record);
 
         // Mettre à jour ou créer automatiquement l'appareil dans /devices
@@ -981,7 +1270,7 @@ app.get('/api/telemetry/latest', async (req, res) => {
                             id: 'dtr_' + k,
                             device_name: devN,
                             status: 'open',
-                            message: item.diagnostic || 'Anomalie détectée en temps réel',
+                            message: item.Diagnostic || item.diagnostic || 'Anomalie détectée en temps réel',
                             anomaly_score: item.anomaly_score,
                             timestamp_ts: item.timestamp_ts || Date.now()
                         });
@@ -1054,7 +1343,7 @@ app.get('/api/telemetry/latest', async (req, res) => {
                 status: latest.status || "NORMAL",
                 connection_type: latest.connection_type || "4G",
                 alert_origin: latest.alert_origin || "",
-                diagnostic: latest.diagnostic || "",
+                diagnostic: latest.Diagnostic || latest.diagnostic || "",
                 vibration_pic: latest.vibration_peak || 0,
                 vibration_moyenne: latest.vibration_rms || latest.vibration_mean || 0,
                 sound_peak: latest.sound_peak || 0,
@@ -1072,7 +1361,7 @@ app.get('/api/telemetry/latest', async (req, res) => {
             },
             cards: cards,
             alerts: openAlerts.slice(0, 5),
-            last_sync: formatParisTime(now)
+            last_sync: now
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1107,7 +1396,7 @@ app.get('/api/telemetry/history', async (req, res) => {
                 targetDevKeys = [...new Set(targetDevKeys)];
 
                 for (const dKey of targetDevKeys) {
-                    const snap = await db.ref('Historique').child(dKey).limitToLast(limit).once('value');
+                    const snap = await db.ref('Historique').child(dKey).once('value');
                     const devVal = snap.val() || {};
                     for (const [k, item] of Object.entries(devVal)) {
                         if (!item || typeof item !== 'object') continue;
@@ -1137,13 +1426,66 @@ app.get('/api/telemetry/history', async (req, res) => {
             }
         }
 
-        // Tri chronologique rigoureux
-        rows.sort((a, b) => {
-            const ta = a.timestamp_ts || parseTsSafe(a.timestamp);
-            const tb = b.timestamp_ts || parseTsSafe(b.timestamp);
-            return ta - tb;
-        });
+        const getTsSafe = (item) => {
+            if (!item) return 0;
+            if (typeof item.timestamp_ts === 'number' && !isNaN(item.timestamp_ts)) return item.timestamp_ts;
+            return parseTsSafe(item.timestamp, item.timestamp_ts);
+        };
 
+        // Tri chronologique rigoureux (ordre croissant temporel)
+        rows.sort((a, b) => getTsSafe(a) - getTsSafe(b));
+
+        // Dédoublonnage intelligent des mesures pour Chart.js (priorité absolue aux alertes sur les données normales)
+        const uniqueRows = [];
+        const seenKeys = new Set();
+        const isAlertPoint = (p) => !!(p && (p.status === 'ALERTE' || p.status === 1 || (p.anomaly_score !== undefined && p.anomaly_score >= (p.anomaly_threshold !== undefined ? p.anomaly_threshold : 100)) || (p._key && p._key.startsWith('Alerte_')) || (p.id && String(p.id).startsWith('Alerte_'))));
+
+        for (const r of rows) {
+            const rKey = r._key || r.id;
+            const rTs = getTsSafe(r);
+
+            if (rKey && seenKeys.has(rKey)) continue;
+
+            if (uniqueRows.length > 0) {
+                const prev = uniqueRows[uniqueRows.length - 1];
+                const prevTs = getTsSafe(prev);
+
+                if (rTs && prevTs && Math.abs(rTs - prevTs) < 2000) {
+                    const currIsAlert = isAlertPoint(r);
+                    const prevIsAlert = isAlertPoint(prev);
+
+                    if (currIsAlert && !prevIsAlert) {
+                        // L'alerte prime absolument sur une mesure normale arrivée au même instant : on la remplace !
+                        uniqueRows[uniqueRows.length - 1] = r;
+                        if (rKey) seenKeys.add(rKey);
+                        continue;
+                    } else if (!currIsAlert && prevIsAlert) {
+                        // L'alerte précédente prime sur la mesure normale : ignorer la normale
+                        continue;
+                    } else if (currIsAlert && prevIsAlert) {
+                        // Deux alertes au même instant (doublon d'événement) : garder celle qui a un diagnostic qualifié
+                        const getBestDiag = (item) => (item && item.Diagnostic && item.Diagnostic !== '""' && item.Diagnostic !== 'null' ? item.Diagnostic : (item ? item.diagnostic : ''));
+                        const currDiag = getBestDiag(r);
+                        const prevDiag = getBestDiag(prev);
+                        const currNamed = currDiag && currDiag !== 'Anomalie' && currDiag !== 'Vibration cyclique excessive';
+                        const prevNamed = prevDiag && prevDiag !== 'Anomalie' && prevDiag !== 'Vibration cyclique excessive';
+                        if (currNamed && !prevNamed) {
+                            uniqueRows[uniqueRows.length - 1] = r;
+                        }
+                        continue;
+                    } else {
+                        // Deux mesures normales à moins de 2s : ignorer le doublon
+                        continue;
+                    }
+                }
+            }
+
+            if (rKey) seenKeys.add(rKey);
+            uniqueRows.push(r);
+        }
+        rows = uniqueRows;
+
+        // Fenêtre glissante dynamique : toujours extraire les 'limit' (ex: 200) points les plus récents dans le temps
         const slice = rows.slice(-limit);
         const labels = slice.map(r => formatParisTime(r.timestamp_ts || r.timestamp));
         const values = slice.map(r => r[metric] !== undefined ? r[metric] : 0);
@@ -1153,10 +1495,10 @@ app.get('/api/telemetry/history', async (req, res) => {
             timestamp: r.timestamp_ts || r.timestamp,
             time_display: formatParisTime(r.timestamp_ts || r.timestamp),
             score: r.anomaly_score !== undefined ? r.anomaly_score : 0,
-            threshold: r.anomaly_threshold !== undefined ? r.anomaly_threshold : 8.0,
+            threshold: r.anomaly_threshold !== undefined ? r.anomaly_threshold : 100,
             status: r.status || "NORMAL",
             alert_origin: r.alert_origin || "",
-            diagnostic: r.diagnostic || "",
+            diagnostic: r.Diagnostic || r.diagnostic || "",
             vibration_rms: r.vibration_rms !== undefined ? r.vibration_rms : (r.vibration_mean || 0),
             vibration_peak: r.vibration_peak !== undefined ? r.vibration_peak : 0,
             sound_rms: r.sound_rms !== undefined ? r.sound_rms : (r.sound_mean || 0),
@@ -1186,18 +1528,6 @@ app.get('/api/historique/history', (req, res, next) => {
 });
 app.get('/api/historique/latest', (req, res, next) => {
     req.url = '/api/telemetry/latest';
-    app.handle(req, res, next);
-});
-app.get('/api/historiques', (req, res, next) => {
-    req.url = '/api/telemetry/history';
-    app.handle(req, res, next);
-});
-app.get('/api/historiques_test', (req, res, next) => {
-    req.url = '/api/telemetry/history';
-    app.handle(req, res, next);
-});
-app.get('/api/historiques_test/history', (req, res, next) => {
-    req.url = '/api/telemetry/history';
     app.handle(req, res, next);
 });
 
@@ -1321,7 +1651,7 @@ app.get('/api/alerts', async (req, res) => {
                     list.push({
                         id: 'dtr_' + k,
                         device_name: devN,
-                        message: item.diagnostic || 'Anomalie en cours',
+                        message: item.Diagnostic || item.diagnostic || 'Anomalie en cours',
                         status: 'open',
                         metric: 'Score IA',
                         value: item.anomaly_score !== undefined ? `${item.anomaly_score} pts` : 'Alerte',
